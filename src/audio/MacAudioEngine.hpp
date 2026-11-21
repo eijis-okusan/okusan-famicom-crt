@@ -3,9 +3,19 @@
 #include <cstddef>
 #include <cstdint>
 
+enum class FreezeStyle : int {
+    CleanTone = 0,
+    MachineGunStutter,
+    PaletteCorruption,
+    VramGarbage,
+    SolidScreenOut,
+    VoltageSagDrain,
+    Count
+};
+
 /**
  * CoreAudio output stream fed from the emulation thread through a lock-free
- * ring buffer, with integrated TV speaker DSP and cartridge-freeze waveform looping.
+ * ring buffer, with integrated TV speaker DSP and cartridge-freeze waveform synthesis.
  */
 class MacAudioEngine {
 public:
@@ -30,7 +40,7 @@ public:
     void updateScreenMetrics(const uint32_t *xrgbPixels, unsigned width, unsigned height);
     void setConsolePowered(bool on);
     void setResetHeld(bool held);
-    void setFrozen(bool frozen);
+    void setFrozen(bool frozen, FreezeStyle style = FreezeStyle::CleanTone, uint32_t seed = 0);
 
     size_t queuedFrames() const;
     size_t targetBufferFrames() const { return targetFrames_; }

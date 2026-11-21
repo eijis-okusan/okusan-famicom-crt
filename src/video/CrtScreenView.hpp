@@ -2,6 +2,7 @@
 
 #import <Cocoa/Cocoa.h>
 #include <cstdint>
+#include "audio/MacAudioEngine.hpp"
 
 class FamicomCore;
 
@@ -41,6 +42,8 @@ struct CrtDisplayConfig {
 - (void)advanceTvRasterFrame;
 - (void)setConsolePowered:(BOOL)powered instant:(BOOL)instant;
 - (void)triggerFreezeGlitch;
+- (void)setFreezeEffect:(FreezeStyle)style seed:(uint32_t)seed active:(BOOL)active;
+- (void)advanceFreezeEffect;
 - (void)triggerResetGlitch;
 - (void)triggerCartridgeBump;
 - (void)showConnectorHud;

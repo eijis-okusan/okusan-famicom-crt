@@ -36,9 +36,48 @@ struct MacAudioEngine::RingState {
     std::vector<float> freezeLoopL;
     std::vector<float> freezeLoopR;
     size_t freezeCursor = 0;
+    FreezeStyle freezeStyle = FreezeStyle::CleanTone;
+    uint32_t freezeSeed = 0;
+    uint32_t freezeRng = 0x5A17C0DEu;
+    size_t freezeSampleAge = 0;
+    double freezeFracPos = 0.0;
+    double sampleRateHz = 48000.0;
 
-    void captureFreezeWaveform() {
+    uint32_t nextFreezeRand() {
+        freezeRng ^= freezeRng << 13;
+        freezeRng ^= freezeRng >> 17;
+        freezeRng ^= freezeRng << 5;
+        return freezeRng;
+    }
+
+    void captureFreezeWaveform(FreezeStyle style, uint32_t seed) {
         freezeCursor = 0;
+        freezeStyle = style;
+        freezeSeed = seed;
+        freezeRng = seed ? seed : 0x5A17C0DEu;
+        freezeSampleAge = 0;
+        freezeFracPos = 0.0;
+
+        if (style == FreezeStyle::SolidScreenOut) {
+            if ((seed & 1u) == 0u) {
+                freezeLoopL.assign(1, 0.0f);
+                freezeLoopR.assign(1, 0.0f);
+            } else {
+                const size_t humLen = std::max<size_t>(64, static_cast<size_t>(std::round(sampleRateHz / 60.0)));
+                freezeLoopL.resize(humLen);
+                freezeLoopR.resize(humLen);
+                for (size_t i = 0; i < humLen; ++i) {
+                    const float phase = static_cast<float>(i) / static_cast<float>(humLen);
+                    const float wave = 0.055f * std::sin(2.0f * static_cast<float>(M_PI) * phase)
+                                     + 0.032f * std::sin(4.0f * static_cast<float>(M_PI) * phase)
+                                     + 0.015f * ((phase < 0.5f) ? 1.0f : -1.0f);
+                    freezeLoopL[i] = wave;
+                    freezeLoopR[i] = wave;
+                }
+            }
+            return;
+        }
+
         if (recentValidCount < 256) {
             freezeLoopL.assign(1, 0.0f);
             freezeLoopR.assign(1, 0.0f);
@@ -54,15 +93,61 @@ struct MacAudioEngine::RingState {
             linearR[i] = recentR[idx];
         }
 
-        // If the APU output was practically silent right before freezing, stay silent.
         float peak = 0.0f;
         const size_t tailLen = std::min<size_t>(count, 800);
         for (size_t i = count - tailLen; i < count; ++i) {
             peak = std::max(peak, std::max(std::abs(linearL[i]), std::abs(linearR[i])));
         }
+
+        if (style == FreezeStyle::MachineGunStutter) {
+            // Grab ~28-56 ms verbatim without zero-cross smoothing for choppy CPU-loop stutter.
+            const size_t minStut = std::min<size_t>(count, static_cast<size_t>(sampleRateHz * 0.028));
+            const size_t maxStut = std::min<size_t>(count, static_cast<size_t>(sampleRateHz * 0.056));
+            const size_t span = std::max<size_t>(1, maxStut - minStut);
+            const size_t stutLen = std::max<size_t>(256, minStut + (nextFreezeRand() % span));
+            const size_t start = count - stutLen;
+            freezeLoopL.assign(linearL.begin() + static_cast<ptrdiff_t>(start), linearL.end());
+            freezeLoopR.assign(linearR.begin() + static_cast<ptrdiff_t>(start), linearR.end());
+            if (peak < 0.008f) {
+                for (size_t i = 0; i < stutLen; ++i) {
+                    const float env = (i < stutLen / 3) ? 0.065f : 0.0f;
+                    const float buzz = ((i / 90) & 1u) ? env : -env;
+                    freezeLoopL[i] += buzz;
+                    freezeLoopR[i] += buzz;
+                }
+            }
+            return;
+        }
+
+        if (style == FreezeStyle::VramGarbage) {
+            const size_t sliceLen = std::min<size_t>(count, 170 + (nextFreezeRand() % 180));
+            const size_t start = count - sliceLen;
+            freezeLoopL.assign(linearL.begin() + static_cast<ptrdiff_t>(start), linearL.end());
+            freezeLoopR.assign(linearR.begin() + static_cast<ptrdiff_t>(start), linearR.end());
+            if (peak < 0.008f) {
+                for (size_t i = 0; i < sliceLen; ++i) {
+                    const float square = (i < sliceLen / 2) ? 0.048f : -0.048f;
+                    freezeLoopL[i] = square;
+                    freezeLoopR[i] = square;
+                }
+            }
+            return;
+        }
+
         if (peak < 0.004f) {
-            freezeLoopL.assign(1, 0.0f);
-            freezeLoopR.assign(1, 0.0f);
+            if (style == FreezeStyle::PaletteCorruption) {
+                const size_t buzzLen = std::max<size_t>(64, static_cast<size_t>(std::round(sampleRateHz / 120.0)));
+                freezeLoopL.resize(buzzLen);
+                freezeLoopR.resize(buzzLen);
+                for (size_t i = 0; i < buzzLen; ++i) {
+                    const float pulse = (i < buzzLen / 4) ? 0.055f : -0.025f;
+                    freezeLoopL[i] = pulse;
+                    freezeLoopR[i] = pulse;
+                }
+            } else {
+                freezeLoopL.assign(1, 0.0f);
+                freezeLoopR.assign(1, 0.0f);
+            }
             return;
         }
 
@@ -141,9 +226,47 @@ struct MacAudioEngine::RingState {
             float inR = 0.0f;
 
             if (useFreezeLoop && !freezeLoopL.empty()) {
-                inL = freezeLoopL[freezeCursor];
-                inR = freezeLoopR[freezeCursor];
-                freezeCursor = (freezeCursor + 1) % freezeLoopL.size();
+                const size_t loopSize = freezeLoopL.size();
+                if (freezeStyle == FreezeStyle::VoltageSagDrain && loopSize > 1) {
+                    const double ageSec = static_cast<double>(freezeSampleAge) / std::max(sampleRateHz, 8000.0);
+                    const double droop = std::min(1.0, ageSec / 2.4);
+                    const double speed = 1.0 - 0.58 * droop;
+                    const float gain = static_cast<float>(1.0 - 0.85 * droop);
+                    const size_t i0 = static_cast<size_t>(freezeFracPos) % loopSize;
+                    const size_t i1 = (i0 + 1) % loopSize;
+                    const float frac = static_cast<float>(freezeFracPos - std::floor(freezeFracPos));
+                    inL = (freezeLoopL[i0] * (1.0f - frac) + freezeLoopL[i1] * frac) * gain;
+                    inR = (freezeLoopR[i0] * (1.0f - frac) + freezeLoopR[i1] * frac) * gain;
+                    if ((nextFreezeRand() & 1023u) < static_cast<uint32_t>(12 + droop * 28.0)) {
+                        const float crackle = (static_cast<int32_t>(nextFreezeRand() & 255u) - 128) * 0.00055f;
+                        inL += crackle;
+                        inR += crackle;
+                    }
+                    freezeFracPos += speed;
+                    if (freezeFracPos >= static_cast<double>(loopSize)) {
+                        freezeFracPos -= static_cast<double>(loopSize) * std::floor(freezeFracPos / static_cast<double>(loopSize));
+                    }
+                    ++freezeSampleAge;
+                } else {
+                    size_t sampleIdx = freezeCursor;
+                    if (freezeStyle == FreezeStyle::PaletteCorruption) {
+                        sampleIdx = (freezeCursor / 3u) * 3u;
+                        inL = std::clamp(freezeLoopL[sampleIdx] * 1.25f, -0.95f, 0.95f);
+                        inR = std::clamp(freezeLoopR[sampleIdx] * 1.25f, -0.95f, 0.95f);
+                    } else if (freezeStyle == FreezeStyle::VramGarbage) {
+                        inL = freezeLoopL[sampleIdx];
+                        inR = freezeLoopR[sampleIdx];
+                        if ((freezeSampleAge % 2900u) < 160u) {
+                            inL *= 0.25f;
+                            inR *= 0.25f;
+                        }
+                        ++freezeSampleAge;
+                    } else {
+                        inL = freezeLoopL[sampleIdx];
+                        inR = freezeLoopR[sampleIdx];
+                    }
+                    freezeCursor = (freezeCursor + 1) % loopSize;
+                }
             } else if (interleavedStereo) {
                 inL = static_cast<float>(interleavedStereo[i * 2 + 0]) * int16Scale * smoothedCartGain;
                 inR = static_cast<float>(interleavedStereo[i * 2 + 1]) * int16Scale * smoothedCartGain;
@@ -213,6 +336,7 @@ MacAudioEngine::~MacAudioEngine() {
 
 bool MacAudioEngine::start(double sampleRate) {
     stop();
+    ring_->sampleRateHz = sampleRate;
     // Keep ~52 ms queued ahead to absorb AppKit key-repeat cadence jitter when holding tilt keys.
     targetFrames_ = static_cast<size_t>(sampleRate * 0.052);
     ring_->smoothedCartGain = ring_->cartAudioGain.load(std::memory_order_relaxed);
@@ -327,11 +451,13 @@ void MacAudioEngine::setResetHeld(bool held) {
     ring_->speakerDsp.setResetHeld(held);
 }
 
-void MacAudioEngine::setFrozen(bool frozen) {
+void MacAudioEngine::setFrozen(bool frozen, FreezeStyle style, uint32_t seed) {
     if (frozen) {
-        ring_->captureFreezeWaveform();
+        ring_->captureFreezeWaveform(style, seed);
     } else {
         ring_->freezeCursor = 0;
+        ring_->freezeFracPos = 0.0;
+        ring_->freezeSampleAge = 0;
     }
 }
 

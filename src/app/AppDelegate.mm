@@ -68,6 +68,7 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
 
     BOOL _paused;
     BOOL _frozen;
+    int _lastFreezeStyle;
     BOOL _resetHeld;
     int _cartTilt;
     int _cartLift;
@@ -423,6 +424,7 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
     _famicom.setCartridgePose(0, 0, 0);
     _audioEngine.setFrozen(false);
     _audioEngine.setResetHeld(false);
+    [_screenView setFreezeEffect:FreezeStyle::CleanTone seed:0 active:NO];
 
     if (_audioStarted && std::abs(_famicom.sampleRate() - _audioSampleRate) > 1.0) {
         _audioSampleRate = _famicom.sampleRate();
@@ -541,10 +543,16 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
     [self refreshMenuStates];
 }
 
-- (void)resetConsole:(id)sender {
+- (void)exitFreezeIfActive {
+    if (!_frozen) return;
     _frozen = NO;
-    _resetHeld = NO;
     _audioEngine.setFrozen(false);
+    [_screenView setFreezeEffect:FreezeStyle::CleanTone seed:0 active:NO];
+}
+
+- (void)resetConsole:(id)sender {
+    [self exitFreezeIfActive];
+    _resetHeld = NO;
     _audioEngine.setResetHeld(false);
     [self triggerConsoleReset];
 }
@@ -581,18 +589,27 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
 
 - (void)toggleFreeze:(id)sender {
     if (!_famicom.isLoaded() || !_screenView.consolePowered || _resetHeld) return;
-    _frozen = !_frozen;
-    _audioEngine.setFrozen(_frozen == YES);
     if (_frozen) {
-        [_screenView triggerFreezeGlitch];
+        [self exitFreezeIfActive];
+    } else {
+        const int styleCount = static_cast<int>(FreezeStyle::Count);
+        int picked = static_cast<int>(arc4random_uniform(static_cast<uint32_t>(styleCount)));
+        if (styleCount > 1 && _lastFreezeStyle >= 0 && picked == _lastFreezeStyle) {
+            picked = (picked + 1 + static_cast<int>(arc4random_uniform(static_cast<uint32_t>(styleCount - 1)))) % styleCount;
+        }
+        _lastFreezeStyle = picked;
+        const FreezeStyle style = static_cast<FreezeStyle>(picked);
+        const uint32_t seed = arc4random();
+        _frozen = YES;
+        _audioEngine.setFrozen(true, style, seed);
+        [_screenView setFreezeEffect:style seed:seed active:YES];
     }
     [self refreshMenuStates];
 }
 
 - (void)toggleConsolePower:(id)sender {
-    _frozen = NO;
+    [self exitFreezeIfActive];
     _resetHeld = NO;
-    _audioEngine.setFrozen(false);
     _audioEngine.setResetHeld(false);
 
     if (!_famicom.isLoaded()) {
@@ -690,8 +707,7 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
         if (event.keyCode == kVK_ANSI_R) {
             if (_famicom.isLoaded() && _screenView.consolePowered && !_resetHeld) {
                 _resetHeld = YES;
-                _frozen = NO;
-                _audioEngine.setFrozen(false);
+                [self exitFreezeIfActive];
                 _audioEngine.setResetHeld(true);
                 [self refreshMenuStates];
             }
@@ -947,7 +963,7 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
         [_screenView advanceTvRasterFrame];
     } else if (_frozen) {
         _audioEngine.pushFrozenFrames(samplesPerFrame);
-        [_screenView advanceTvRasterFrame];
+        [_screenView advanceFreezeEffect];
     } else if (_paused) {
         _audioEngine.pushSilenceFrames(samplesPerFrame);
         if ([_screenView isConnectorHudVisible]) {
@@ -984,6 +1000,7 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     _pressedKeys.fill(false);
+    _lastFreezeStyle = -1;
 
     const NSRect initialFrame = NSMakeRect(0, 0, 1024, 768);
     _window = [[NSWindow alloc] initWithContentRect:initialFrame
