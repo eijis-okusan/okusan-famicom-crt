@@ -17,9 +17,9 @@ A standalone Famicom / NES player for macOS that pairs a **1980s 14-inch CRT tel
 | **B&W RF Television / P4 Phosphor (`Cmd + 3`)** | **Flat RGB Monitor (`Cmd + 1`, Curvature Off `Cmd + C`)** |
 | ![B&W RF Television](docs/images/screen-bw-rf.png) | ![Flat RGB Monitor](docs/images/screen-rgb-flat.jpg) |
 
-**Tilted Cartridge `T:+20` + 60-Pin Inspector HUD (`\`)**
-
-![60-Pin Cartridge Tilt and Live HUD](docs/images/screen-cart-tilt-hud.jpg)
+| **Contact-Fault Cold Boot (`@`)** | **Tilted Cartridge `T:+20` + 60-Pin Inspector HUD (`\`)** |
+| :---: | :---: |
+| ![Contact-Fault Cold Boot](docs/images/screen-contact-fault.jpg) | ![60-Pin Cartridge Tilt and Live HUD](docs/images/screen-cart-tilt-hud.jpg) |
 
 ---
 

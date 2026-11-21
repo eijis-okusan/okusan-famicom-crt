@@ -17,9 +17,9 @@
 | **白黒 RF テレビ / P4 蛍光体 (`Cmd + 3`)** | **フラット RGB モニター (`Cmd + 1` + 曲率OFF `Cmd + C`)** |
 | ![白黒 RF テレビ](docs/images/screen-bw-rf.png) | ![フラット RGB モニター](docs/images/screen-rgb-flat.jpg) |
 
-**斜め差し `T:+20` ＋ 60ピン接点解析 HUD (`\`)**
-
-![斜め差しと60ピンHUD](docs/images/screen-cart-tilt-hud.jpg)
+| **接触不良コールドブート (`@`)** | **斜め差し `T:+20` ＋ 60ピン接点解析 HUD (`\`)** |
+| :---: | :---: |
+| ![接触不良コールドブート](docs/images/screen-contact-fault.jpg) | ![斜め差しと60ピンHUD](docs/images/screen-cart-tilt-hud.jpg) |
 
 ---
 
