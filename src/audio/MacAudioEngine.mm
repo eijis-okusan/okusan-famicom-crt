@@ -40,7 +40,6 @@ struct MacAudioEngine::RingState {
     uint32_t freezeSeed = 0;
     uint32_t freezeRng = 0x5A17C0DEu;
     size_t freezeSampleAge = 0;
-    double freezeFracPos = 0.0;
     double sampleRateHz = 48000.0;
 
     uint32_t nextFreezeRand() {
@@ -56,7 +55,6 @@ struct MacAudioEngine::RingState {
         freezeSeed = seed;
         freezeRng = seed ? seed : 0x5A17C0DEu;
         freezeSampleAge = 0;
-        freezeFracPos = 0.0;
 
         if (recentValidCount < 256) {
             freezeLoopL.assign(1, 0.0f);
@@ -207,46 +205,24 @@ struct MacAudioEngine::RingState {
 
             if (useFreezeLoop && !freezeLoopL.empty()) {
                 const size_t loopSize = freezeLoopL.size();
-                if (freezeStyle == FreezeStyle::VoltageSagDrain && loopSize > 1) {
-                    const double ageSec = static_cast<double>(freezeSampleAge) / std::max(sampleRateHz, 8000.0);
-                    const double droop = std::min(1.0, ageSec / 2.4);
-                    const double speed = 1.0 - 0.58 * droop;
-                    const float gain = static_cast<float>(1.0 - 0.85 * droop);
-                    const size_t i0 = static_cast<size_t>(freezeFracPos) % loopSize;
-                    const size_t i1 = (i0 + 1) % loopSize;
-                    const float frac = static_cast<float>(freezeFracPos - std::floor(freezeFracPos));
-                    inL = (freezeLoopL[i0] * (1.0f - frac) + freezeLoopL[i1] * frac) * gain;
-                    inR = (freezeLoopR[i0] * (1.0f - frac) + freezeLoopR[i1] * frac) * gain;
-                    if ((nextFreezeRand() & 1023u) < static_cast<uint32_t>(12 + droop * 28.0)) {
-                        const float crackle = (static_cast<int32_t>(nextFreezeRand() & 255u) - 128) * 0.00055f;
-                        inL += crackle;
-                        inR += crackle;
-                    }
-                    freezeFracPos += speed;
-                    if (freezeFracPos >= static_cast<double>(loopSize)) {
-                        freezeFracPos -= static_cast<double>(loopSize) * std::floor(freezeFracPos / static_cast<double>(loopSize));
+                size_t sampleIdx = freezeCursor;
+                if (freezeStyle == FreezeStyle::PaletteCorruption) {
+                    sampleIdx = (freezeCursor / 3u) * 3u;
+                    inL = std::clamp(freezeLoopL[sampleIdx] * 1.25f, -0.95f, 0.95f);
+                    inR = std::clamp(freezeLoopR[sampleIdx] * 1.25f, -0.95f, 0.95f);
+                } else if (freezeStyle == FreezeStyle::VramGarbage) {
+                    inL = freezeLoopL[sampleIdx];
+                    inR = freezeLoopR[sampleIdx];
+                    if ((freezeSampleAge % 2900u) < 160u) {
+                        inL *= 0.25f;
+                        inR *= 0.25f;
                     }
                     ++freezeSampleAge;
                 } else {
-                    size_t sampleIdx = freezeCursor;
-                    if (freezeStyle == FreezeStyle::PaletteCorruption) {
-                        sampleIdx = (freezeCursor / 3u) * 3u;
-                        inL = std::clamp(freezeLoopL[sampleIdx] * 1.25f, -0.95f, 0.95f);
-                        inR = std::clamp(freezeLoopR[sampleIdx] * 1.25f, -0.95f, 0.95f);
-                    } else if (freezeStyle == FreezeStyle::VramGarbage) {
-                        inL = freezeLoopL[sampleIdx];
-                        inR = freezeLoopR[sampleIdx];
-                        if ((freezeSampleAge % 2900u) < 160u) {
-                            inL *= 0.25f;
-                            inR *= 0.25f;
-                        }
-                        ++freezeSampleAge;
-                    } else {
-                        inL = freezeLoopL[sampleIdx];
-                        inR = freezeLoopR[sampleIdx];
-                    }
-                    freezeCursor = (freezeCursor + 1) % loopSize;
+                    inL = freezeLoopL[sampleIdx];
+                    inR = freezeLoopR[sampleIdx];
                 }
+                freezeCursor = (freezeCursor + 1) % loopSize;
             } else if (interleavedStereo) {
                 inL = static_cast<float>(interleavedStereo[i * 2 + 0]) * int16Scale * smoothedCartGain;
                 inR = static_cast<float>(interleavedStereo[i * 2 + 1]) * int16Scale * smoothedCartGain;
@@ -436,7 +412,6 @@ void MacAudioEngine::setFrozen(bool frozen, FreezeStyle style, uint32_t seed) {
         ring_->captureFreezeWaveform(style, seed);
     } else {
         ring_->freezeCursor = 0;
-        ring_->freezeFracPos = 0.0;
         ring_->freezeSampleAge = 0;
     }
 }

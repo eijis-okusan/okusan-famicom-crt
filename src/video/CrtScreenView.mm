@@ -178,7 +178,6 @@ GLuint createFrameTexture() {
     unsigned _freezeHeight;
     std::vector<uint32_t> _freezeFrameA;
     std::vector<uint32_t> _freezeFrameB;
-    std::vector<uint32_t> _freezeWork;
 }
 
 + (NSOpenGLPixelFormat *)defaultPixelFormat {
@@ -404,13 +403,6 @@ static uint32_t scalePixelRgb(uint32_t pixel, float rMul, float gMul, float bMul
                 }
             }
         }
-    } else if (style == FreezeStyle::VoltageSagDrain) {
-        const unsigned tearY = 60u + (nextFreezeVisualRng(_freezeRng) % std::max(1u, height - 120u));
-        for (unsigned y = tearY; y < std::min(height, tearY + 24u); ++y) {
-            uint32_t *row = _freezeFrameA.data() + static_cast<size_t>(y) * width;
-            std::rotate(row, row + 6, row + width);
-        }
-        _freezeWork = _freezeFrameA;
     }
 
     [self ensureGLReady];
@@ -434,23 +426,6 @@ static uint32_t scalePixelRgb(uint32_t pixel, float rMul, float gMul, float bMul
                                 toTexture:_currentFrameTex
                                     width:_freezeWidth
                                    height:_freezeHeight];
-            }
-        } else if (_freezeStyle == FreezeStyle::VoltageSagDrain && !_freezeFrameA.empty()) {
-            if (_freezeTick <= 150 && (_freezeTick % 4) == 0) {
-                const float sagScale = std::max(0.32f, 1.0f - (static_cast<float>(_freezeTick) / 150.0f) * 0.68f);
-                _freezeWork.resize(_freezeFrameA.size());
-                for (size_t i = 0; i < _freezeFrameA.size(); ++i) {
-                    _freezeWork[i] = scalePixelRgb(_freezeFrameA[i], sagScale, sagScale, sagScale);
-                }
-                [self ensureGLReady];
-                [self.openGLContext makeCurrentContext];
-                [self uploadTopDownPixels:_freezeWork.data() toTexture:_currentFrameTex width:_freezeWidth height:_freezeHeight];
-                [self uploadTopDownPixels:_freezeWork.data() toTexture:_previousFrameTex width:_freezeWidth height:_freezeHeight];
-            }
-            if (_freezeTick < 150 && (nextFreezeVisualRng(_freezeRng) % 28u) == 0u) {
-                _transientTime = CFAbsoluteTimeGetCurrent();
-                _transientPeak = 0.35f;
-                _transientDecay = 30.0f;
             }
         }
     }
