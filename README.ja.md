@@ -172,7 +172,7 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
 │   └── Info.plist                  # バンドル情報（v0.5）
 ├── src/
 │   ├── app/                        # main.mm, AppDelegate (メニュー/履歴/同期), AppLocalization
-│   ├── core/                       # FamicomCore（標準 C++17 の libretro ローダ＆60ピンAPI）
+│   ├── core/                       # FamicomCore & CartridgeFaultInjector（標準 C++17 の libretro ローダ＆60ピンAPI）
 │   ├── audio/                      # TvSpeakerDsp.hpp（標準 C++17）と CoreAudio 出力
 │   ├── video/                      # CrtScreenView（OpenGL 2-pass CRT 描画＆HUD合成）
 │   ├── hud/                        # CartConnectorHud（CoreGraphics 1:1 mm コネクタ＆解析UI）

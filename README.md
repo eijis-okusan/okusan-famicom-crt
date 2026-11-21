@@ -173,7 +173,7 @@ The UI automatically matches your macOS system language on launch, and can be sw
 │   └── Info.plist                  # Bundle metadata (v0.5)
 ├── src/
 │   ├── app/                        # main.mm, AppDelegate (menus/history/pacing), AppLocalization
-│   ├── core/                       # FamicomCore (pure C++17 libretro loader & 60-pin bridge)
+│   ├── core/                       # FamicomCore & CartridgeFaultInjector (pure C++17 libretro/60-pin API)
 │   ├── audio/                      # TvSpeakerDsp.hpp (pure C++17) & MacAudioEngine (CoreAudio)
 │   ├── video/                      # CrtScreenView (OpenGL 2-pass renderer & HUD overlay blit)
 │   ├── hud/                        # CartConnectorHud (CoreGraphics 1:1 mm connector & inspector)

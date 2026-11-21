@@ -13,7 +13,8 @@ CXXFLAGS   := -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc -DGL_SILE
 OBJCFLAGS  := -fobjc-arc
 FRAMEWORKS := -framework Cocoa -framework OpenGL -framework AudioToolbox -framework GameController -framework UniformTypeIdentifiers
 
-CPP_SRCS   := src/core/FamicomCore.cpp
+CPP_SRCS   := src/core/FamicomCore.cpp \
+              src/core/CartridgeFaultInjector.cpp
 MM_SRCS    := src/app/main.mm \
               src/app/AppDelegate.mm \
               src/app/AppLocalization.mm \

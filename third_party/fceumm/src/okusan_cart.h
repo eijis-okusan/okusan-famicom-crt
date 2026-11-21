@@ -56,6 +56,7 @@ typedef struct {
  */
 void okusan_set_cart_contact(int tilt, int lift);
 void okusan_set_cart_contact3(int tilt, int lift, int pitch);
+/* Bit i (0..59 = Front 1..30, Back 31..60) forces WEAK high-resistance or OPEN contact regardless of pose. */
 void okusan_set_pin_fault_masks(uint64_t weak_mask, uint64_t open_mask);
 void okusan_reseat_cart_contact(void);
 int  okusan_cart_is_active(void);

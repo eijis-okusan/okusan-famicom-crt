@@ -7,6 +7,7 @@
 #include <mach/mach_time.h>
 
 #include "audio/MacAudioEngine.hpp"
+#include "core/CartridgeFaultInjector.hpp"
 #include "core/FamicomCore.hpp"
 #include "input/ControllerSettingsWindow.hpp"
 #include "input/InputBindings.hpp"
@@ -52,155 +53,20 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
     return false;
 }
 
-struct PinBootConfig {
-    int tilt = 0;
-    int lift = 0;
-    int pitch = 0;
-    uint64_t weakMask = 0ULL;
-    uint64_t openMask = 0ULL;
-};
-
-bool pinIsCpuCritical(int p) {
-    // CPU A0..A14 (1..12, 32..34), R/W (13), M2 (31), CPU D7..D0 (35..42), /ROMSEL (43)
-    return (p >= 1 && p <= 13) || (p >= 31 && p <= 43);
+// Match cartridge contact keys by character when possible so both US ANSI and Japanese JIS
+// keyboards work intuitively (e.g., JIS '@' sits at kVK_ANSI_LeftBracket, and ']' sits at Backslash).
+bool isContactFaultBootShortcut(NSEvent *event) {
+    NSString *chars = event.characters ?: @"";
+    NSString *charsIgn = event.charactersIgnoringModifiers ?: @"";
+    return [chars isEqualToString:@"@"] || [charsIgn isEqualToString:@"@"];
 }
 
-bool frameHasVisibleDetail(const uint32_t *px, unsigned w, unsigned h) {
-    if (!px || w == 0 || h == 0) return false;
-    uint32_t sampleColors[4] = {};
-    int uniqueCount = 0;
-    int brightCount = 0;
-    const size_t total = static_cast<size_t>(w) * h;
-    for (size_t i = 0; i < total; i += 67) {
-        const uint32_t c = px[i] & 0x00FFFFFFu;
-        if (((c >> 16) & 0xFFu) + ((c >> 8) & 0xFFu) + (c & 0xFFu) >= 110u) ++brightCount;
-        bool seen = false;
-        for (int k = 0; k < uniqueCount; ++k) {
-            if (sampleColors[k] == c) { seen = true; break; }
-        }
-        if (!seen && uniqueCount < 4) {
-            sampleColors[uniqueCount++] = c;
-        }
-        if (brightCount >= 18 && uniqueCount >= 3) return true;
-    }
-    return false;
-}
-
-void sanitizePowerRailMasks(uint64_t &weakM, uint64_t &openM) {
-    // Avoid dead-black dual-GND or dual-VCC simultaneous OPEN; degrade one side to WEAK for bounce/brownout.
-    constexpr uint64_t gndBoth = (1ULL << 0) | (1ULL << 15);
-    constexpr uint64_t vccBoth = (1ULL << 29) | (1ULL << 30);
-    if ((openM & gndBoth) == gndBoth) {
-        const int toWeak = (arc4random_uniform(2) == 0) ? 15 : 0;
-        openM &= ~(1ULL << toWeak);
-        weakM |= (1ULL << toWeak);
-    }
-    if ((openM & vccBoth) == vccBoth) {
-        const int toWeak = (arc4random_uniform(2) == 0) ? 30 : 29;
-        openM &= ~(1ULL << toWeak);
-        weakM |= (1ULL << toWeak);
-    }
-}
-
-void addFaultPin(PinBootConfig &cfg, int p, int openChancePct, int attempt, int &cpuFaults) {
-    if (p < 0 || p >= 60) return;
-    if (pinIsCpuCritical(p)) {
-        const int maxCpuFaults = (attempt >= 4) ? 2 : 4;
-        if (cpuFaults >= maxCpuFaults) return;
-        ++cpuFaults;
-    }
-    int effOpenPct = pinIsCpuCritical(p) ? std::min(22, openChancePct / 3) : openChancePct;
-    if (attempt >= 2 && pinIsCpuCritical(p)) effOpenPct = 0;
-    if (static_cast<int>(arc4random_uniform(100)) < effOpenPct) {
-        cfg.openMask |= (1ULL << p);
-        cfg.weakMask &= ~(1ULL << p);
-    } else if (((cfg.openMask >> p) & 1ULL) == 0ULL) {
-        cfg.weakMask |= (1ULL << p);
-    }
-}
-
-void addAdjacentPinCluster(PinBootConfig &cfg, int startPos, int sideBase, int len,
-                           int openChancePct, int attempt, int &cpuFaults) {
-    for (int k = 0; k < len; ++k) {
-        const int pos = startPos + k;
-        if (pos >= 30) break;
-        addFaultPin(cfg, sideBase + pos, openChancePct, attempt, cpuFaults);
-    }
-}
-
-PinBootConfig generateRandomContactFault(int attempt) {
-    PinBootConfig cfg;
-
-    // Optional physical 3-DOF seating skew (~40% of boots) mixed freely with 1..3 fault spots across all 60 pins.
-    if (arc4random_uniform(5) < 2) {
-        const int dir = static_cast<int>(arc4random_uniform(4));
-        if (dir == 1) {
-            cfg.tilt = -(4 + static_cast<int>(arc4random_uniform(7)));
-        } else if (dir >= 2) {
-            cfg.tilt = 4 + static_cast<int>(arc4random_uniform(11));
-        }
-        cfg.lift = static_cast<int>(arc4random_uniform(3));
-        cfg.pitch = static_cast<int>(arc4random_uniform(5)) - 2;
-    }
-
-    const int spotCount = 1 + static_cast<int>(arc4random_uniform(3));
-    const int openChancePct = 25 + static_cast<int>(arc4random_uniform(65));
-    int cpuFaults = 0;
-
-    for (int s = 0; s < spotCount; ++s) {
-        const int pos = static_cast<int>(arc4random_uniform(30));
-        const int sideBase = (arc4random_uniform(2) == 0) ? 0 : 30;
-        const int shape = static_cast<int>(arc4random_uniform(10));
-        if (shape < 4) {
-            addFaultPin(cfg, sideBase + pos, openChancePct, attempt, cpuFaults);
-        } else if (shape < 8) {
-            const int len = 2 + static_cast<int>(arc4random_uniform(3));
-            addAdjacentPinCluster(cfg, pos, sideBase, len, openChancePct, attempt, cpuFaults);
-        } else {
-            addFaultPin(cfg, pos, openChancePct, attempt, cpuFaults);
-            addFaultPin(cfg, 30 + pos, openChancePct, attempt, cpuFaults);
-        }
-    }
-
-    if ((cfg.weakMask | cfg.openMask) == 0ULL) {
-        const int p = static_cast<int>(arc4random_uniform(60));
-        cfg.weakMask |= (1ULL << p);
-    }
-
-    sanitizePowerRailMasks(cfg.weakMask, cfg.openMask);
-    return cfg;
-}
-
-bool probePinBootConfigViable(FamicomCore &core, const PinBootConfig &cfg) {
-    core.setPinFaultMasks(cfg.weakMask, cfg.openMask);
-    core.setCartridgePose(cfg.tilt, cfg.lift, cfg.pitch);
-    if (!core.isCartridgePowered()) return false;
-    CartPinReading readings[60];
-    int tt = 0, tl = 0, tp = 0;
-    bool anyFaultedPin = false;
-    if (core.readPinTelemetry(tt, tl, tp, readings, 60)) {
-        for (int i = 0; i < 60; ++i) {
-            if ((readings[i].contactState & 0x0F) != 0) {
-                anyFaultedPin = true;
-                break;
-            }
-        }
-    }
-    if (!anyFaultedPin) return false;
-    core.reset();
-    for (int f = 0; f < 46; ++f) {
-        core.runFrame(0, nullptr);
-        if (!core.isCartridgePowered()) return false;
-        if (f >= 14 && (((f - 14) % 6) == 0 || f == 45)) {
-            if (frameHasVisibleDetail(core.currentPixels(), core.width(), core.height())) {
-                return true;
-            }
-        }
-        if (core.isCpuJammed()) {
-            return frameHasVisibleDetail(core.currentPixels(), core.width(), core.height());
-        }
-    }
-    return false;
+bool isCartridgeContactShortcut(NSEvent *event) {
+    NSString *charsIgn = event.charactersIgnoringModifiers ?: @"";
+    return event.keyCode == kVK_ANSI_Comma || event.keyCode == kVK_ANSI_Period ||
+           event.keyCode == kVK_ANSI_Slash ||
+           [charsIgn isEqualToString:@"["] || [charsIgn isEqualToString:@"]"] ||
+           [charsIgn isEqualToString:@"\\"] || [charsIgn isEqualToString:@"¥"];
 }
 
 } // namespace
@@ -254,6 +120,8 @@ bool probePinBootConfigViable(FamicomCore &core, const PinBootConfig &cfg) {
     NSWindow *_licensesWindow;
     NSTextView *_licensesTextView;
 }
+
+#pragma mark - Preferences & Recent ROMs
 
 - (void)loadUserPreferences {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -391,6 +259,13 @@ bool probePinBootConfigViable(FamicomCore &core, const PinBootConfig &cfg) {
     _menuLangEnglish.state = (langMode == AppLanguageMode::English) ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
+- (void)assignUnmodifiedFunctionKey:(unichar)fnKey toItem:(NSMenuItem *)item {
+    item.keyEquivalent = [NSString stringWithCharacters:&fnKey length:1];
+    item.keyEquivalentModifierMask = 0;
+}
+
+#pragma mark - Menu Bar
+
 - (void)buildMenuBar {
     NSMenu *mainMenu = [[NSMenu alloc] init];
 
@@ -447,16 +322,12 @@ bool probePinBootConfigViable(FamicomCore &core, const PinBootConfig &cfg) {
     NSMenuItem *quickSaveItem = [emuMenu addItemWithTitle:app_l10n::tr(@"クイックセーブ", @"Quick Save")
                                                    action:@selector(quickSave:)
                                             keyEquivalent:@""];
-    const unichar f5Key = NSF5FunctionKey;
-    quickSaveItem.keyEquivalent = [NSString stringWithCharacters:&f5Key length:1];
-    quickSaveItem.keyEquivalentModifierMask = 0;
+    [self assignUnmodifiedFunctionKey:NSF5FunctionKey toItem:quickSaveItem];
 
     NSMenuItem *quickLoadItem = [emuMenu addItemWithTitle:app_l10n::tr(@"クイックロード", @"Quick Load")
                                                    action:@selector(quickLoad:)
                                             keyEquivalent:@""];
-    const unichar f8Key = NSF8FunctionKey;
-    quickLoadItem.keyEquivalent = [NSString stringWithCharacters:&f8Key length:1];
-    quickLoadItem.keyEquivalentModifierMask = 0;
+    [self assignUnmodifiedFunctionKey:NSF8FunctionKey toItem:quickLoadItem];
 
     [emuMenu addItem:[NSMenuItem separatorItem]];
     _menuMute = [emuMenu addItemWithTitle:app_l10n::tr(@"ミュート", @"Mute Audio")
@@ -762,6 +633,8 @@ bool probePinBootConfigViable(FamicomCore &core, const PinBootConfig &cfg) {
     [self refreshMenuStates];
 }
 
+#pragma mark - Power, Freeze & Contact Faults
+
 - (void)prepareConsoleForPowerTransition {
     [self exitFreezeIfActive];
     _resetHeld = NO;
@@ -798,29 +671,12 @@ bool probePinBootConfigViable(FamicomCore &core, const PinBootConfig &cfg) {
     }
 
     _paused = NO;
-    PinBootConfig chosen;
-    bool foundViable = false;
-    for (int attempt = 0; attempt < 8; ++attempt) {
-        PinBootConfig candidate = generateRandomContactFault(attempt);
-        if (probePinBootConfigViable(_famicom, candidate)) {
-            chosen = candidate;
-            foundViable = true;
-            break;
-        }
-        if (attempt == 0) chosen = candidate;
-    }
-
-    if (!foundViable) {
-        chosen.tilt = 4 + static_cast<int>(arc4random_uniform(6));
-        chosen.weakMask = (1ULL << 17) | (1ULL << 44) | (1ULL << 47);
-        chosen.openMask = (1ULL << (19 + arc4random_uniform(8)));
-    }
-
-    // Apply contact fault BEFORE cold power-on so it is already faulted from frame 0.
-    _cartTilt = chosen.tilt;
-    _cartLift = chosen.lift;
-    _cartPitch = chosen.pitch;
-    _famicom.setPinFaultMasks(chosen.weakMask, chosen.openMask);
+    // Apply the randomized contact fault before cold reset so glitching starts from frame 0.
+    const CartridgeFaultPlan faultPlan = selectViableRandomFaultBoot(_famicom);
+    _cartTilt = faultPlan.tilt;
+    _cartLift = faultPlan.lift;
+    _cartPitch = faultPlan.pitch;
+    _famicom.setPinFaultMasks(faultPlan.weakMask, faultPlan.openMask);
     _famicom.setCartridgePose(_cartTilt, _cartLift, _cartPitch);
     _famicom.reset();
 
@@ -863,6 +719,8 @@ bool probePinBootConfigViable(FamicomCore &core, const PinBootConfig &cfg) {
     _audioEngine.setResetHeld(false);
     [self triggerConsoleReset];
 }
+
+#pragma mark - Keyboard, Cartridge Pose & Gamepad Input
 
 - (void)handleCartridgeContactKey:(NSEvent *)event {
     if (!_famicom.isLoaded()) return;
@@ -919,20 +777,15 @@ bool probePinBootConfigViable(FamicomCore &core, const PinBootConfig &cfg) {
 - (void)crtScreenDidReceiveKeyDown:(NSEvent *)event {
     const NSEventModifierFlags cmdMods =
         event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption);
-    NSString *chars = event.characters ?: @"";
-    NSString *charsIgn = event.charactersIgnoringModifiers ?: @"";
 
     if (cmdMods == 0) {
-        if ([chars isEqualToString:@"@"] || [charsIgn isEqualToString:@"@"]) {
+        if (isContactFaultBootShortcut(event)) {
             if (!event.isARepeat) {
                 [self toggleBadBootSwitch:nil];
             }
             return;
         }
-        if (event.keyCode == kVK_ANSI_Comma || event.keyCode == kVK_ANSI_Period ||
-            event.keyCode == kVK_ANSI_Slash ||
-            [charsIgn isEqualToString:@"["] || [charsIgn isEqualToString:@"]"] ||
-            [charsIgn isEqualToString:@"\\"] || [charsIgn isEqualToString:@"¥"]) {
+        if (isCartridgeContactShortcut(event)) {
             [self handleCartridgeContactKey:event];
             return;
         }
