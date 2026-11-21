@@ -1,0 +1,17 @@
+# Build outputs
+build/
+*.o
+*.d
+*.dylib
+*.dll
+*.so
+*.app/
+
+# macOS Finder / editor junk
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*~
+.vscode/
+.idea/

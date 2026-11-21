@@ -1,0 +1,24 @@
+name: macOS Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build FCEUmm core and macOS app bundle
+        run: make
+
+      - name: Verify app bundle structure and code signature
+        run: |
+          test -f "build/Okusan Famicom CRT.app/Contents/MacOS/OkusanFamicomCRT"
+          test -f "build/Okusan Famicom CRT.app/Contents/Frameworks/fceumm_libretro.dylib"
+          test -f "build/Okusan Famicom CRT.app/Contents/Resources/LICENSE.txt"
+          codesign --verify --deep --strict "build/Okusan Famicom CRT.app"
