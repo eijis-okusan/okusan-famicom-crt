@@ -14,8 +14,12 @@ A standalone Famicom / NES player for macOS that pairs a **1980s 14-inch CRT tel
 | Color RF Television (`Cmd + 2`) | RGB Monitor (`Cmd + 1`) |
 | :---: | :---: |
 | ![Color RF Television](docs/images/screen-color-rf.jpg) | ![RGB Monitor](docs/images/screen-rgb.jpg) |
-| **B&W RF Television / P4 Phosphor (`Cmd + 3`)** | **Tilted Cartridge `T:+20` + 60-Pin Inspector HUD (`\`)** |
-| ![B&W RF Television](docs/images/screen-bw-rf.png) | ![60-Pin Cartridge Tilt and Live HUD](docs/images/screen-cart-tilt-hud.jpg) |
+| **B&W RF Television / P4 Phosphor (`Cmd + 3`)** | **Flat RGB Monitor (`Cmd + 1`, Curvature Off `Cmd + C`)** |
+| ![B&W RF Television](docs/images/screen-bw-rf.png) | ![Flat RGB Monitor](docs/images/screen-rgb-flat.jpg) |
+
+**Tilted Cartridge `T:+20` + 60-Pin Inspector HUD (`\`)**
+
+![60-Pin Cartridge Tilt and Live HUD](docs/images/screen-cart-tilt-hud.jpg)
 
 ---
 
@@ -27,6 +31,7 @@ All video output passes through **Pass 0** ([`okusan-crt-beamload.glsl`](resourc
 
 - **RGB Monitor** ([`okusan-crt-display.glsl`](resources/shaders/okusan-crt-display.glsl), `Cmd + 1`)
   - Clean RGB signal with barrel tube curvature, aperture slot mask, NTSC 480i alternating-field interlace or 240p scanlines, subtle RGB gun convergence offset, glass halation, and HV bloom.
+  - Under the **CRT Display** menu, you can also flatten the tube (`Tube Curvature (Off = Flat)`, `Cmd + C`) and toggle scanline interlace (`Cmd + I`), HV bloom (`Cmd + B`), or slot mask (`Cmd + K`) to dial in a razor-sharp **flat RGB CRT** look.
 - **Color RF Television** ([`okusan-crt-rf-display.glsl`](resources/shaders/okusan-crt-rf-display.glsl), `Cmd + 2`)
   - Models NTSC YIQ composite encoding along each scanline, 300-ohm twin-lead reflection ghosts (`-5 tap` and `-10 tap`), pre-demodulation Gaussian + impulse RF snow noise, and 6-tap orthogonal subcarrier demodulation—naturally producing chroma bleed, 3.58 MHz cross-color shimmer on fine patterns, dot crawl, and P22 phosphor decay.
 - **B&W RF Television** ([`okusan-crt-bw-display.glsl`](resources/shaders/okusan-crt-bw-display.glsl), `Cmd + 3`)

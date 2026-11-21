@@ -14,8 +14,12 @@
 | カラー RF テレビ (`Cmd + 2`) | RGB モニター (`Cmd + 1`) |
 | :---: | :---: |
 | ![カラー RF テレビ](docs/images/screen-color-rf.jpg) | ![RGB モニター](docs/images/screen-rgb.jpg) |
-| **白黒 RF テレビ / P4 蛍光体 (`Cmd + 3`)** | **斜め差し `T:+20` ＋ 60ピン接点解析 HUD (`\`)** |
-| ![白黒 RF テレビ](docs/images/screen-bw-rf.png) | ![斜め差しと60ピンHUD](docs/images/screen-cart-tilt-hud.jpg) |
+| **白黒 RF テレビ / P4 蛍光体 (`Cmd + 3`)** | **フラット RGB モニター (`Cmd + 1` + 曲率OFF `Cmd + C`)** |
+| ![白黒 RF テレビ](docs/images/screen-bw-rf.png) | ![フラット RGB モニター](docs/images/screen-rgb-flat.jpg) |
+
+**斜め差し `T:+20` ＋ 60ピン接点解析 HUD (`\`)**
+
+![斜め差しと60ピンHUD](docs/images/screen-cart-tilt-hud.jpg)
 
 ---
 
@@ -27,6 +31,7 @@
 
 - **RGB モニター**（[`okusan-crt-display.glsl`](resources/shaders/okusan-crt-display.glsl), `Cmd + 1`）
   - くっきりした RGB 入力に対し、管面曲率・スロットマスク・480i 交互フィールド走査線／240p切替・微細な3電子銃コンバージェンスずれ・ガラス内面ハレーション・HV ブルームを適用します。
+  - **CRT ディスプレイ** メニューから **ブラウン管曲率 (OFF = 平面)**（`Cmd + C`）をオフにすることで **RGB フラット表示** も可能なほか、480i/240p（`Cmd + I`）・HV ブルーム（`Cmd + B`）・スロットマスク（`Cmd + K`）も個別に切り替えられます。
 - **カラー RF テレビ**（[`okusan-crt-rf-display.glsl`](resources/shaders/okusan-crt-rf-display.glsl), `Cmd + 2`）
   - 走査線単位での NTSC YIQ コンポジット変調、300Ω 平行フィーダー線反射ゴースト（`-5 tap` / `-10 tap`）、復調前のガウシアン＋インパルス RF 砂嵐ノイズ、6タップ直交色副搬送波復調を物理ベースで計算し、色滲み・3.58 MHz クロスカラー・ドットクロール・P22 蛍光体残光を自然に発生させます。
 - **白黒 RF テレビ / P4 蛍光体**（[`okusan-crt-bw-display.glsl`](resources/shaders/okusan-crt-bw-display.glsl), `Cmd + 3`）
