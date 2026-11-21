@@ -404,21 +404,6 @@ static uint32_t scalePixelRgb(uint32_t pixel, float rMul, float gMul, float bMul
                 }
             }
         }
-    } else if (style == FreezeStyle::SolidScreenOut) {
-        uint32_t solidColor = 0xFF000000u;
-        if ((nextFreezeVisualRng(_freezeRng) & 1u) != 0 && height > 12 && width > 12) {
-            solidColor = cur[static_cast<size_t>(12) * width + 12];
-        }
-        std::fill(_freezeFrameA.begin(), _freezeFrameA.end(), solidColor);
-        if ((nextFreezeVisualRng(_freezeRng) & 1u) != 0 && height >= 8) {
-            for (unsigned y = 0; y < 8; ++y) {
-                for (unsigned x = 0; x < width; ++x) {
-                    if (((x >> 3) + y) & 1u) {
-                        _freezeFrameA[static_cast<size_t>(y) * width + x] = cur[static_cast<size_t>(y) * width + ((x * 3u) % width)];
-                    }
-                }
-            }
-        }
     } else if (style == FreezeStyle::VoltageSagDrain) {
         const unsigned tearY = 60u + (nextFreezeVisualRng(_freezeRng) % std::max(1u, height - 120u));
         for (unsigned y = tearY; y < std::min(height, tearY + 24u); ++y) {

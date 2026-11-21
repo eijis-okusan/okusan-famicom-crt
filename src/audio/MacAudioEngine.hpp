@@ -8,7 +8,6 @@ enum class FreezeStyle : int {
     MachineGunStutter,
     PaletteCorruption,
     VramGarbage,
-    SolidScreenOut,
     VoltageSagDrain,
     Count
 };

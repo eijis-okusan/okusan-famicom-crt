@@ -41,7 +41,7 @@ In RF modes, stereo APU output is summed to mono and routed through [`TvSpeakerD
 - **Small Paper-Cone Speaker EQ**: Cascaded 2nd-order 580 Hz HPFs (24 dB/oct bass rolloff), a 740 Hz midrange scoop (`-4.5 dB`), a 1650 Hz narrow cone resonance (`+6.5 dB`), cascaded 2850 Hz LPFs, and soft `tanh(1.48x)` speaker/amp saturation.
 - **Screen-Modulated Intercarrier Buzz**: Every frame [`FrameLuminanceStats`](src/audio/TvSpeakerDsp.hpp) samples luma, white peaks, chroma, and horizontal edges across 16 vertical screen bands to modulate 59.94 Hz vertical-sync buzz and `720 / 1080 / 1560 Hz` intercarrier harmonics—bright white text or flashes audibly buzz the speaker.
 - **De-Clicked Gates & Crossfades**: 20 ms power gate, 8 ms reset mute gate, 12 ms RGB↔RF crossfade, and open-tuner white noise (`380 Hz–6.2 kHz`) when unpowered.
-- **Cartridge Contact Freeze (`F`)**: Pressing `F` randomly triggers one of six classic hardware crash styles—clean AMDF pitch-locked tone, rapid 2-frame machine-gun stutter, `$2001` color-emphasis / palette inversion, scattered 8×8 VRAM tile garbage, single-color / black crash screen, or brownout pitch-droop drain—and pressing `F` again cleanly resumes gameplay.
+- **Cartridge Contact Freeze (`F`)**: Pressing `F` randomly triggers one of five classic hardware crash styles—clean AMDF pitch-locked tone, rapid 2-frame machine-gun stutter, `$2001` color-emphasis / palette inversion, scattered 8×8 VRAM tile garbage, or brownout pitch-droop drain—and pressing `F` again cleanly resumes gameplay.
 - **Cartridge Audio Pins (`Pin 45/46`)**: `SND IN / SND OUT` contact area smoothly attenuates game audio over a ~5 ms ramp when tilting the cartridge.
 
 ### 3. HVC-001 60-Pin Cartridge Tilt & Bus Simulator (`third_party/fceumm/`, `src/hud/`)

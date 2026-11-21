@@ -58,26 +58,6 @@ struct MacAudioEngine::RingState {
         freezeSampleAge = 0;
         freezeFracPos = 0.0;
 
-        if (style == FreezeStyle::SolidScreenOut) {
-            if ((seed & 1u) == 0u) {
-                freezeLoopL.assign(1, 0.0f);
-                freezeLoopR.assign(1, 0.0f);
-            } else {
-                const size_t humLen = std::max<size_t>(64, static_cast<size_t>(std::round(sampleRateHz / 60.0)));
-                freezeLoopL.resize(humLen);
-                freezeLoopR.resize(humLen);
-                for (size_t i = 0; i < humLen; ++i) {
-                    const float phase = static_cast<float>(i) / static_cast<float>(humLen);
-                    const float wave = 0.055f * std::sin(2.0f * static_cast<float>(M_PI) * phase)
-                                     + 0.032f * std::sin(4.0f * static_cast<float>(M_PI) * phase)
-                                     + 0.015f * ((phase < 0.5f) ? 1.0f : -1.0f);
-                    freezeLoopL[i] = wave;
-                    freezeLoopR[i] = wave;
-                }
-            }
-            return;
-        }
-
         if (recentValidCount < 256) {
             freezeLoopL.assign(1, 0.0f);
             freezeLoopR.assign(1, 0.0f);
