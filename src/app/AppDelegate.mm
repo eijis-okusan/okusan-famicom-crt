@@ -52,6 +52,157 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
     return false;
 }
 
+struct PinBootConfig {
+    int tilt = 0;
+    int lift = 0;
+    int pitch = 0;
+    uint64_t weakMask = 0ULL;
+    uint64_t openMask = 0ULL;
+};
+
+bool pinIsCpuCritical(int p) {
+    // CPU A0..A14 (1..12, 32..34), R/W (13), M2 (31), CPU D7..D0 (35..42), /ROMSEL (43)
+    return (p >= 1 && p <= 13) || (p >= 31 && p <= 43);
+}
+
+bool frameHasVisibleDetail(const uint32_t *px, unsigned w, unsigned h) {
+    if (!px || w == 0 || h == 0) return false;
+    uint32_t sampleColors[4] = {};
+    int uniqueCount = 0;
+    int brightCount = 0;
+    const size_t total = static_cast<size_t>(w) * h;
+    for (size_t i = 0; i < total; i += 67) {
+        const uint32_t c = px[i] & 0x00FFFFFFu;
+        if (((c >> 16) & 0xFFu) + ((c >> 8) & 0xFFu) + (c & 0xFFu) >= 110u) ++brightCount;
+        bool seen = false;
+        for (int k = 0; k < uniqueCount; ++k) {
+            if (sampleColors[k] == c) { seen = true; break; }
+        }
+        if (!seen && uniqueCount < 4) {
+            sampleColors[uniqueCount++] = c;
+        }
+        if (brightCount >= 18 && uniqueCount >= 3) return true;
+    }
+    return false;
+}
+
+void sanitizePowerRailMasks(uint64_t &weakM, uint64_t &openM) {
+    // Avoid dead-black dual-GND or dual-VCC simultaneous OPEN; degrade one side to WEAK for bounce/brownout.
+    constexpr uint64_t gndBoth = (1ULL << 0) | (1ULL << 15);
+    constexpr uint64_t vccBoth = (1ULL << 29) | (1ULL << 30);
+    if ((openM & gndBoth) == gndBoth) {
+        const int toWeak = (arc4random_uniform(2) == 0) ? 15 : 0;
+        openM &= ~(1ULL << toWeak);
+        weakM |= (1ULL << toWeak);
+    }
+    if ((openM & vccBoth) == vccBoth) {
+        const int toWeak = (arc4random_uniform(2) == 0) ? 30 : 29;
+        openM &= ~(1ULL << toWeak);
+        weakM |= (1ULL << toWeak);
+    }
+}
+
+void addFaultPin(PinBootConfig &cfg, int p, int openChancePct, int attempt, int &cpuFaults) {
+    if (p < 0 || p >= 60) return;
+    if (pinIsCpuCritical(p)) {
+        const int maxCpuFaults = (attempt >= 4) ? 2 : 4;
+        if (cpuFaults >= maxCpuFaults) return;
+        ++cpuFaults;
+    }
+    int effOpenPct = pinIsCpuCritical(p) ? std::min(22, openChancePct / 3) : openChancePct;
+    if (attempt >= 2 && pinIsCpuCritical(p)) effOpenPct = 0;
+    if (static_cast<int>(arc4random_uniform(100)) < effOpenPct) {
+        cfg.openMask |= (1ULL << p);
+        cfg.weakMask &= ~(1ULL << p);
+    } else if (((cfg.openMask >> p) & 1ULL) == 0ULL) {
+        cfg.weakMask |= (1ULL << p);
+    }
+}
+
+void addAdjacentPinCluster(PinBootConfig &cfg, int startPos, int sideBase, int len,
+                           int openChancePct, int attempt, int &cpuFaults) {
+    for (int k = 0; k < len; ++k) {
+        const int pos = startPos + k;
+        if (pos >= 30) break;
+        addFaultPin(cfg, sideBase + pos, openChancePct, attempt, cpuFaults);
+    }
+}
+
+PinBootConfig generateRandomContactFault(int attempt) {
+    PinBootConfig cfg;
+
+    // Optional physical 3-DOF seating skew (~40% of boots) mixed freely with 1..3 fault spots across all 60 pins.
+    if (arc4random_uniform(5) < 2) {
+        const int dir = static_cast<int>(arc4random_uniform(4));
+        if (dir == 1) {
+            cfg.tilt = -(4 + static_cast<int>(arc4random_uniform(7)));
+        } else if (dir >= 2) {
+            cfg.tilt = 4 + static_cast<int>(arc4random_uniform(11));
+        }
+        cfg.lift = static_cast<int>(arc4random_uniform(3));
+        cfg.pitch = static_cast<int>(arc4random_uniform(5)) - 2;
+    }
+
+    const int spotCount = 1 + static_cast<int>(arc4random_uniform(3));
+    const int openChancePct = 25 + static_cast<int>(arc4random_uniform(65));
+    int cpuFaults = 0;
+
+    for (int s = 0; s < spotCount; ++s) {
+        const int pos = static_cast<int>(arc4random_uniform(30));
+        const int sideBase = (arc4random_uniform(2) == 0) ? 0 : 30;
+        const int shape = static_cast<int>(arc4random_uniform(10));
+        if (shape < 4) {
+            addFaultPin(cfg, sideBase + pos, openChancePct, attempt, cpuFaults);
+        } else if (shape < 8) {
+            const int len = 2 + static_cast<int>(arc4random_uniform(3));
+            addAdjacentPinCluster(cfg, pos, sideBase, len, openChancePct, attempt, cpuFaults);
+        } else {
+            addFaultPin(cfg, pos, openChancePct, attempt, cpuFaults);
+            addFaultPin(cfg, 30 + pos, openChancePct, attempt, cpuFaults);
+        }
+    }
+
+    if ((cfg.weakMask | cfg.openMask) == 0ULL) {
+        const int p = static_cast<int>(arc4random_uniform(60));
+        cfg.weakMask |= (1ULL << p);
+    }
+
+    sanitizePowerRailMasks(cfg.weakMask, cfg.openMask);
+    return cfg;
+}
+
+bool probePinBootConfigViable(FamicomCore &core, const PinBootConfig &cfg) {
+    core.setPinFaultMasks(cfg.weakMask, cfg.openMask);
+    core.setCartridgePose(cfg.tilt, cfg.lift, cfg.pitch);
+    if (!core.isCartridgePowered()) return false;
+    CartPinReading readings[60];
+    int tt = 0, tl = 0, tp = 0;
+    bool anyFaultedPin = false;
+    if (core.readPinTelemetry(tt, tl, tp, readings, 60)) {
+        for (int i = 0; i < 60; ++i) {
+            if ((readings[i].contactState & 0x0F) != 0) {
+                anyFaultedPin = true;
+                break;
+            }
+        }
+    }
+    if (!anyFaultedPin) return false;
+    core.reset();
+    for (int f = 0; f < 46; ++f) {
+        core.runFrame(0, nullptr);
+        if (!core.isCartridgePowered()) return false;
+        if (f >= 14 && (((f - 14) % 6) == 0 || f == 45)) {
+            if (frameHasVisibleDetail(core.currentPixels(), core.width(), core.height())) {
+                return true;
+            }
+        }
+        if (core.isCpuJammed()) {
+            return frameHasVisibleDetail(core.currentPixels(), core.width(), core.height());
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 @implementation AppDelegate {
@@ -327,6 +478,9 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
     _menuPower = [displayMenu addItemWithTitle:app_l10n::tr(@"ファミコン電源 (O)", @"Famicom Power (O)")
                                         action:@selector(toggleConsolePower:)
                                  keyEquivalent:@""];
+    [displayMenu addItemWithTitle:app_l10n::tr(@"接触不良起動 / スイッチOFF (@)", @"Contact Fault Boot / Power Off (@)")
+                           action:@selector(toggleBadBootSwitch:)
+                    keyEquivalent:@""];
     [displayMenu addItem:[NSMenuItem separatorItem]];
     _menuRgb = [displayMenu addItemWithTitle:app_l10n::tr(@"RGB モニター (okusan-crt-rgb)", @"RGB Monitor (okusan-crt-rgb)")
                                       action:@selector(selectRgbMode:)
@@ -421,6 +575,7 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
     _cartTilt = 0;
     _cartLift = 0;
     _cartPitch = 0;
+    _famicom.setPinFaultMasks(0, 0);
     _famicom.setCartridgePose(0, 0, 0);
     _audioEngine.setFrozen(false);
     _audioEngine.setResetHeld(false);
@@ -607,11 +762,34 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
     [self refreshMenuStates];
 }
 
-- (void)toggleConsolePower:(id)sender {
+- (void)prepareConsoleForPowerTransition {
     [self exitFreezeIfActive];
     _resetHeld = NO;
     _audioEngine.setResetHeld(false);
+    _cartTilt = 0;
+    _cartLift = 0;
+    _cartPitch = 0;
+    if (_famicom.isLoaded()) {
+        _famicom.setPinFaultMasks(0, 0);
+        _famicom.setCartridgePose(0, 0, 0);
+    }
+}
 
+- (void)powerOffConsole {
+    [self prepareConsoleForPowerTransition];
+    if (_famicom.isLoaded()) {
+        _famicom.reset();
+    }
+    if (!_screenView.displayConfig.rfMode) {
+        [_screenView clearToBlack];
+    }
+    [_screenView setConsolePowered:NO instant:NO];
+    _audioEngine.setConsolePowered(false);
+    [self refreshMenuStates];
+}
+
+- (void)launchRandomContactFaultBoot {
+    [self prepareConsoleForPowerTransition];
     if (!_famicom.isLoaded()) {
         [_screenView setConsolePowered:NO instant:YES];
         _audioEngine.setConsolePowered(false);
@@ -619,13 +797,59 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
         return;
     }
 
-    const BOOL powerOnNext = !_screenView.consolePowered;
-    _famicom.reset();
-    if (!powerOnNext && !_screenView.displayConfig.rfMode) {
-        [_screenView clearToBlack];
+    _paused = NO;
+    PinBootConfig chosen;
+    bool foundViable = false;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        PinBootConfig candidate = generateRandomContactFault(attempt);
+        if (probePinBootConfigViable(_famicom, candidate)) {
+            chosen = candidate;
+            foundViable = true;
+            break;
+        }
+        if (attempt == 0) chosen = candidate;
     }
-    [_screenView setConsolePowered:powerOnNext instant:NO];
-    _audioEngine.setConsolePowered(powerOnNext == YES);
+
+    if (!foundViable) {
+        chosen.tilt = 4 + static_cast<int>(arc4random_uniform(6));
+        chosen.weakMask = (1ULL << 17) | (1ULL << 44) | (1ULL << 47);
+        chosen.openMask = (1ULL << (19 + arc4random_uniform(8)));
+    }
+
+    // Apply contact fault BEFORE cold power-on so it is already faulted from frame 0.
+    _cartTilt = chosen.tilt;
+    _cartLift = chosen.lift;
+    _cartPitch = chosen.pitch;
+    _famicom.setPinFaultMasks(chosen.weakMask, chosen.openMask);
+    _famicom.setCartridgePose(_cartTilt, _cartLift, _cartPitch);
+    _famicom.reset();
+
+    [_screenView setConsolePowered:YES instant:NO];
+    _audioEngine.setConsolePowered(true);
+    [_screenView triggerResetGlitch];
+    [_screenView showConnectorHud];
+    [self refreshMenuStates];
+}
+
+- (void)toggleBadBootSwitch:(id)sender {
+    if (!_famicom.isLoaded() || _screenView.consolePowered) {
+        [self powerOffConsole];
+        return;
+    }
+    [self launchRandomContactFaultBoot];
+}
+
+- (void)toggleConsolePower:(id)sender {
+    if (!_famicom.isLoaded() || _screenView.consolePowered) {
+        [self powerOffConsole];
+        return;
+    }
+
+    [self prepareConsoleForPowerTransition];
+    _paused = NO;
+    _famicom.reset();
+    [_screenView setConsolePowered:YES instant:NO];
+    _audioEngine.setConsolePowered(true);
     [self refreshMenuStates];
 }
 
@@ -644,21 +868,33 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
     if (!_famicom.isLoaded()) return;
 
     const BOOL shiftDown = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+    NSString *charsIgn = event.charactersIgnoringModifiers ?: @"";
+    const BOOL isPinKey = [charsIgn isEqualToString:@"\\"] || [charsIgn isEqualToString:@"¥"] ||
+                          (event.keyCode == kVK_ANSI_Backslash && ![charsIgn isEqualToString:@"]"]);
+    const BOOL isSlashKey = (event.keyCode == kVK_ANSI_Slash);
+    const BOOL isPitchDown = [charsIgn isEqualToString:@"["];
+    const BOOL isPitchUp = [charsIgn isEqualToString:@"]"];
     const int prevTilt = _cartTilt;
     const int prevLift = _cartLift;
     const int prevPitch = _cartPitch;
 
-    if (event.keyCode == kVK_ANSI_Backslash) {
+    if (isPinKey) {
         if (!event.isARepeat) [_screenView toggleConnectorHudPinned];
         return;
-    } else if (event.keyCode == kVK_ANSI_Slash) {
+    } else if (isSlashKey) {
         if (event.isARepeat) return;
         _cartTilt = 0;
         _cartLift = 0;
         _cartPitch = 0;
-    } else if (event.keyCode == kVK_ANSI_LeftBracket) {
+        _famicom.reseatCartridge();
+        if (_screenView.consolePowered) {
+            [_screenView triggerCartridgeBump];
+        }
+        [_screenView showConnectorHud];
+        return;
+    } else if (isPitchDown) {
         _cartPitch = std::max(-8, _cartPitch - 1);
-    } else if (event.keyCode == kVK_ANSI_RightBracket) {
+    } else if (isPitchUp) {
         _cartPitch = std::min(8, _cartPitch + 1);
     } else if (event.keyCode == kVK_ANSI_Comma) {
         if (shiftDown) _cartLift = std::min(16, _cartLift + 1);
@@ -672,11 +908,7 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
     }
 
     if (_cartTilt != prevTilt || _cartLift != prevLift || _cartPitch != prevPitch) {
-        if (event.keyCode == kVK_ANSI_Slash) {
-            _famicom.reseatCartridge();
-        } else {
-            _famicom.setCartridgePose(_cartTilt, _cartLift, _cartPitch);
-        }
+        _famicom.setCartridgePose(_cartTilt, _cartLift, _cartPitch);
         if (_screenView.consolePowered && (!event.isARepeat || (std::abs(_cartTilt) & 3) == 0)) {
             [_screenView triggerCartridgeBump];
         }
@@ -687,12 +919,23 @@ bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pr
 - (void)crtScreenDidReceiveKeyDown:(NSEvent *)event {
     const NSEventModifierFlags cmdMods =
         event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption);
+    NSString *chars = event.characters ?: @"";
+    NSString *charsIgn = event.charactersIgnoringModifiers ?: @"";
 
-    if (cmdMods == 0 && (event.keyCode == kVK_ANSI_Comma || event.keyCode == kVK_ANSI_Period ||
-                         event.keyCode == kVK_ANSI_Slash || event.keyCode == kVK_ANSI_LeftBracket ||
-                         event.keyCode == kVK_ANSI_RightBracket || event.keyCode == kVK_ANSI_Backslash)) {
-        [self handleCartridgeContactKey:event];
-        return;
+    if (cmdMods == 0) {
+        if ([chars isEqualToString:@"@"] || [charsIgn isEqualToString:@"@"]) {
+            if (!event.isARepeat) {
+                [self toggleBadBootSwitch:nil];
+            }
+            return;
+        }
+        if (event.keyCode == kVK_ANSI_Comma || event.keyCode == kVK_ANSI_Period ||
+            event.keyCode == kVK_ANSI_Slash ||
+            [charsIgn isEqualToString:@"["] || [charsIgn isEqualToString:@"]"] ||
+            [charsIgn isEqualToString:@"\\"] || [charsIgn isEqualToString:@"¥"]) {
+            [self handleCartridgeContactKey:event];
+            return;
+        }
     }
 
     if (!event.isARepeat && cmdMods == 0) {

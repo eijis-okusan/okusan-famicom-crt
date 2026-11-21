@@ -45,8 +45,9 @@ public:
     void runFrame(uint32_t pad1Mask, const AudioFrameSink &audioSink);
     void reset();
 
-    // Cartridge mechanical pose (tilt: -32..+32, lift: 0..16, pitch: -8..+8)
+    // Cartridge mechanical pose (tilt: -32..+32, lift: 0..16, pitch: -8..+8) & per-pin fault masks
     void setCartridgePose(int tilt, int lift, int pitch);
+    void setPinFaultMasks(uint64_t weakMask, uint64_t openMask);
     void reseatCartridge();
 
     bool readPinTelemetry(int &tilt, int &lift, int &pitch, CartPinReading *outReadings, int maxPins) const;

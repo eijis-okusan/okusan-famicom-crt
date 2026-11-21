@@ -46,20 +46,21 @@ In RF modes, stereo APU output is summed to mono and routed through [`TvSpeakerD
 - **Small Paper-Cone Speaker EQ**: Cascaded 2nd-order 580 Hz HPFs (24 dB/oct bass rolloff), a 740 Hz midrange scoop (`-4.5 dB`), a 1650 Hz narrow cone resonance (`+6.5 dB`), cascaded 2850 Hz LPFs, and soft `tanh(1.48x)` speaker/amp saturation.
 - **Screen-Modulated Intercarrier Buzz**: Every frame [`FrameLuminanceStats`](src/audio/TvSpeakerDsp.hpp) samples luma, white peaks, chroma, and horizontal edges across 16 vertical screen bands to modulate 59.94 Hz vertical-sync buzz and `720 / 1080 / 1560 Hz` intercarrier harmonics—bright white text or flashes audibly buzz the speaker.
 - **De-Clicked Gates & Crossfades**: 20 ms power gate, 8 ms reset mute gate, 12 ms RGB↔RF crossfade, and open-tuner white noise (`380 Hz–6.2 kHz`) when unpowered.
-- **Cartridge Contact Freeze (`F`)**: Pressing `F` randomly triggers one of four classic hardware crash styles—clean AMDF pitch-locked tone, rapid 2-frame machine-gun stutter, `$2001` color-emphasis / palette inversion, or scattered 8×8 VRAM tile garbage—and pressing `F` again cleanly resumes gameplay.
+- **Cartridge Contact Freeze (`F`)**: Pressing `F` randomly triggers one of four classic hardware crash styles—clean AMDF pitch-locked tone, rapid 2-frame machine-gun stutter, `$2001` color-emphasis / palette inversion, or scattered 8×8 VRAM tile garbage (including synthesized pulse/square buzz fallback if triggered immediately after boot)—and pressing `F` again cleanly resumes gameplay.
 - **Cartridge Audio Pins (`Pin 45/46`)**: `SND IN / SND OUT` contact area smoothly attenuates game audio over a ~5 ms ramp when tilting the cartridge.
 
-### 3. HVC-001 60-Pin Cartridge Tilt & Bus Simulator (`third_party/fceumm/`, `src/hud/`)
+### 3. HVC-001 60-Pin Cartridge Tilt, Faulty Cold Boot & Bus Simulator (`third_party/fceumm/`, `src/hud/`)
 
-The modified `fceumm` core embeds an exact micrometer-scale physical model of the 60-pin Famicom cartridge slot (`2.54 mm` pitch, `78.00 mm` PCB width, `1.55 mm` gold fingers, `1.10 mm` console spring wipers, `10.00 mm` blue socket depth, `±0.35 mm` lateral play, per-pin wear variance).
+The modified `fceumm` core embeds an exact micrometer-scale physical model of the 60-pin Famicom cartridge slot (`2.54 mm` pitch, `78.00 mm` PCB width, `1.55 mm` gold fingers, `1.10 mm` console spring wipers, `10.00 mm` blue socket depth, `±0.35 mm` lateral play, per-pin wear variance) plus explicit per-pin fault masks (`okusan_set_pin_fault_masks`).
 
-- **3-DOF Controls**: Lateral tilt (`<` / `>`, `-32..+32`), vertical pull-up lift (`Shift + <` / `>`, `0..+16`), front/back pitch (`[` / `]`, `-8..+8`), and instant reseat (`/` or `?`).
+- **3-DOF Controls**: Lateral tilt (`<` / `>`, `-32..+32`), vertical pull-up lift (`Shift + <` / `>`, `0..+16`), front/back pitch (`[` / `]`, `-8..+8`), and instant reseat (`/` or `?`)—with both US ANSI and Japanese JIS key layout detection for `@`, `[`, `]`, `\`, and `¥`.
+- **60-Pin Contact-Fault Cold Boot & Power Switch (`@`)**: When the console is ON, `@` powers it OFF cleanly (clearing tilt/masks). Pressing `@` while OFF injects randomized pre-boot contact faults—varying freely in both **pin position and count** across all 60 pins (`0..59`), mixing single oxidized pins, 2–4 pin adjacent clusters, front/back slot pairs, and optional 3-DOF skew—*before* power-on and pops open the 60-pin HUD automatically.
 - **Hardware-Accurate Faults**:
   - **Ohm's Law `Vcc` Brownout**: Parallel contact resistance across `GND1/GND2` and `+5V L/R` drops cartridge rail voltage under load (`Vcc < 3.40 V` triggers power loss and RF snow; `3.40–4.35 V` introduces access-delay glitches).
-  - **Asymmetric RC Delay & Slow Drift**: `WEAK` contacts delay `0→1` pull-up transitions more strongly than `1→0` pull-downs, with boundary drift locked to a ~2.1 s period (`frame_tick >> 7`) so screen corruption stays stable rather than flickering unnaturally at 60 Hz.
-  - **Real CPU/PPU Open Bus**:
+  - **Asymmetric RC Delay, Sparse CPU Chatter & Slow Drift**: `WEAK` contacts delay `0→1` pull-up transitions more strongly than `1→0` pull-downs, with boundary drift locked to a ~2.1 s period (`frame_tick >> 7`) so screen corruption stays stable rather than flickering unnaturally at 60 Hz. Light/medium oxidized PRG/CPU lines glitch sparsely on rare transitions so games boot past the reset vector and crash organically mid-boot instead of always dying black on frame 0.
+  - **Real CPU/PPU Open Bus & 8px Vertical Jailbars**:
     - CPU `$4020–$FFFF` hooks route `A0..A14`, `D0..D7`, `R/W`, `M2`, `/ROMSEL`, and external `/IRQ`; floating `/ROMSEL` or `CPU D0..D7` feeds open-bus (`X.DB`) until the 6502 jams on an illegal opcode (`Reset` + `Reseat` to recover).
-    - PPU reads model the 2C02 multiplexed bus (`vadr & 0xFF` on CHR open-bus, `off & 0xFF` on `CIRAM /CE` or `PPU /A13` open-bus, plus `CIRAM A10` mirroring faults).
+    - PPU reads model the 2C02 multiplexed bus (`vadr & 0xFF` on CHR address/control open-bus, steady CMOS/NMOS `1` pull-up on isolated open `PPU D0..D7` lines to produce authentic **8px-periodic vertical jailbars**, `off & 0xFF` on weak/open `CIRAM /CE` or `PPU /A13` nametable reads, plus `CIRAM A10` mirroring faults).
     - Snapping a faulted cartridge back with **`/` (`?`)** latches a one-shot spurious write into internal 2 KB `CIRAM` (`NTARAM`), leaving background tile corruption on the current screen until scrolled away, changed, or reset (`R`).
 - **Interactive 1:1 mm HUD (`\` or click)**: Visualizes the blue socket cross-section, spring-to-pad overlap, air gaps, `Vcc`, `[W/M/O/X]` totals, all 60 pin tiles with live HIGH duty bars and cyan `XTALK` links, and a clickable per-pin live bus inspector (`$orig -> $eff`).
 - Full mathematical & hardware specification: [`docs/60pin-hardware-notes.en.md`](docs/60pin-hardware-notes.en.md) ([日本語版仕様書](docs/60pin-hardware-notes.md))
@@ -130,8 +131,9 @@ make distclean   # Remove build/ and clean third_party/fceumm objects
 | `Shift + <` / `Shift + >` | Lift cartridge up / down (`0 .. +16`) |
 | `[` / `]` | Rock cartridge front / back (`-8 .. +8`) |
 | `/` (`?`) | Reseat cartridge flat (`0, 0, 0`) |
-| `\` (or click HUD) | Pin / unpin the 60-pin connector HUD |
+| `\` (or click HUD) | Pin / unpin the 60-pin connector HUD (`\` or `¥` on JIS) |
 | `O` | Toggle Famicom console power (cold boot on power-on) |
+| `@` | When ON: power OFF; when OFF: cold-boot with random 60-pin faults + HUD |
 | `R` (press or hold) | Reset console (mutes audio & clears picture while held) |
 | `F` | Toggle contact freeze (latches audio pitch loop + screen bump) |
 | `P` | Pause / resume emulation |

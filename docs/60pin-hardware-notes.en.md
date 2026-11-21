@@ -35,16 +35,17 @@ Defined in [`third_party/fceumm/src/okusan_cart.h`](../third_party/fceumm/src/ok
 - **`tilt` (`-32 .. +32`)** — `<` / `>`: Lateral rock. Negative lifts the left (PRG/CPU) edge; positive lifts the right (PPU/CHR) edge.
 - **`lift` (`0 .. +16`)** — `Shift + <` / `Shift + >`: Uniform vertical pull-up (`330 µm` per step, up to `5.28 mm`).
 - **`pitch` (`-8 .. +8`)** — `[` / `]`: Front-to-back rock inside the socket, shifting spring normal preload between Front (1–30) and Back (31–60) faces.
-- **Reseat (`0, 0, 0`)** — `/` (`?`): Snaps the cartridge back to fully seated.
+- **Reseat (`0, 0, 0`)** — `/` (`?`): Snaps the cartridge back to fully seated and clears any explicit per-pin fault masks.
+- **Randomized Fault Cold Boot & Power OFF (`@`)** — Acts as Power OFF when ON; when OFF, uses [`okusan_set_pin_fault_masks`](../third_party/fceumm/src/ppu.c#L555) plus optional 3-DOF pose skew to randomize faulted pin positions and counts across all 60 pins (`0..59`) *before* power-on (profile-free; US ANSI & Japanese JIS key layouts supported).
 
 ### 2.2 Per-Pin Overlap Calculation
 1. **Longitudinal coordinate `x_um`**: `((pos * 2) - 29) * 1270 µm` (`pos = 0..29`).
-2. **Rigid-body vertical rise `rise_um`** ([`okusan_cart_edge_rise_um`](../third_party/fceumm/src/ppu.c#L344), [`okusan_cart_pin_rise_um`](../third_party/fceumm/src/ppu.c#L355)):
+2. **Rigid-body vertical rise `rise_um`** ([`okusan_cart_edge_rise_um`](../third_party/fceumm/src/ppu.c#L346), [`okusan_cart_pin_rise_um`](../third_party/fceumm/src/ppu.c#L357)):
    $$\text{rise}_{\text{edge}}(x) = 330 \cdot \text{lift} + \frac{|\text{tilt}| \cdot 185 \cdot \text{dist}(x)}{2 \cdot 39000}$$
    $$\text{rise}_{\text{pin}} = \max\!\left(0,\ \text{rise}_{\text{edge}}(x) + \begin{cases} -45 \cdot \text{pitch} & (\text{Front } 1..30) \\ +45 \cdot \text{pitch} & (\text{Back } 31..60) \end{cases}\right)$$
 3. **Vertical overlap `ov_v`** (after per-pin manufacturing wear/tolerance `wear_um ∈ [-200, +180] µm`):
    $$[\text{pad\_bot}, \text{pad\_top}] = [1000 + \text{rise}_{\text{pin}} + \text{wear},\ 7500 + \text{rise}_{\text{pin}} + \text{wear}] \cap [2500, 4200]$$
-4. **Lateral overlap width `lat_ov_w`** ([`okusan_cart_lat_shift_um`](../third_party/fceumm/src/ppu.c#L367)):
+4. **Lateral overlap width `lat_ov_w`** ([`okusan_cart_lat_shift_um`](../third_party/fceumm/src/ppu.c#L369)):
    $$\text{lat\_shift} = \frac{|\text{tilt}| \cdot 185 \cdot \max(800, 3350 - \text{lift}\cdot 165)}{2 \cdot 39000} + \frac{|\text{tilt}| \cdot 350}{32}$$
    $$\text{lat\_ov\_w} = \text{clamp}\!\left(1325 - \text{lat\_shift},\ 0,\ 1100\right)\ \text{µm}$$
 5. **Front/back spring preload `preload_um`**:
@@ -82,12 +83,13 @@ When any signal pin is not `Seated`, if its left or right neighbor on the same P
 ## 4. CPU, PPU & Audio Bus Integration
 
 - **CPU Bus (`$4020-$FFFF`, `x6502.c`)**: [`okusan_cpu_read_cart`](../third_party/fceumm/src/x6502.c#L87), [`WrMemNorm`](../third_party/fceumm/src/x6502.c#L109), and [`X6502_DMW`](../third_party/fceumm/src/x6502.c#L148) route `CPU A0..A14`, `D0..D7`, `R/W`, `M2`, and `/ROMSEL` (`$8000+`). Floating `/ROMSEL` feeds `X.DB` open-bus until 6502 hits an illegal opcode (`X.jammed`); recover via Reseat (`/`) + Reset (`R`).
-- **External `/IRQ` (Pin 15)**: [`okusan_map_irq`](../third_party/fceumm/src/ppu.c#L719) gates external mapper IRQs (`FCEU_IQEXT | FCEU_IQEXT2`) independently of console-internal Reset / NMI / APU interrupts.
+- **Per-Pin Explicit Fault Masks (`okusan_set_pin_fault_masks`)**: Pins in `open_mask` drop to `0 µm / OPEN` and pins in `weak_mask` clamp to `700 + wear_um` (`440..940 µm / WEAK`), enabling dirty-pin faults independently or combined with 3-DOF tilt/lift/pitch. Sparse transition chatter on light/medium CPU `WEAK` contacts (~1 in 2048 edges) yields realistic mid-boot glitches/crashes after the reset vector.
+- **External `/IRQ` (Pin 15)**: [`okusan_map_irq`](../third_party/fceumm/src/ppu.c#L758) gates external mapper IRQs (`FCEU_IQEXT | FCEU_IQEXT2`) independently of console-internal Reset / NMI / APU interrupts.
 - **PPU Pattern, Nametable & `$2007`**:
-  - `CHR` reads model 2C02 multiplexed open-bus `vadr & 0xFF` when `PPU /RD` or `PPU A13` opens.
-  - `CIRAM` reads ([`okusan_read_nt_byte`](../third_party/fceumm/src/ppu.c#L779)) return open-bus `off & 0xFF` for both tile IDs and attributes if `CIRAM /CE` or `PPU /A13` fails, and honor `CIRAM A10` mirroring faults.
-  - `$2007` writes ([`B2007`](../third_party/fceumm/src/ppu.c#L1140)) check `PPU /WR`, `CIRAM /CE`, `PPU /A13`, and `PPU A13` independently.
-  - **Persistent CIRAM latch on `?` reseat ([`okusan_reseat_cart_contact`](../third_party/fceumm/src/ppu.c#L901))**: Normal angle adjustments leave internal 2 KB `NTARAM` clean, whereas snapping back with `/` (`?`) from a powered faulted pose stamps a one-shot spurious write into `NTARAM` so corrupted background tiles stay visible on screen until overwritten by scrolling, screen transitions, or Reset (`R`).
+  - `CHR` reads model 2C02 multiplexed open-bus `vadr & 0xFF` when `PPU /RD` or `PPU A13` opens, while [`okusan_map_ppu_data_bus`](../third_party/fceumm/src/ppu.c#L888) pulls open individual `PPU D0..D7` pins to steady `1` (CMOS/NMOS pull-up) to produce authentic **8px-periodic vertical jailbars**.
+  - `CIRAM` reads ([`okusan_read_nt_byte`](../third_party/fceumm/src/ppu.c#L818)) return open-bus `off & 0xFF` for both tile IDs and attributes if `CIRAM /CE` or `PPU /A13` fails (including `WEAK`/`MARGINAL`), and honor `CIRAM A10` mirroring faults.
+  - `$2007` writes ([`B2007`](../third_party/fceumm/src/ppu.c#L1186)) check `PPU /WR`, `CIRAM /CE`, `PPU /A13`, and `PPU A13` independently.
+  - **Persistent CIRAM latch on `?` reseat ([`okusan_reseat_cart_contact`](../third_party/fceumm/src/ppu.c#L945))**: Normal angle adjustments leave internal 2 KB `NTARAM` clean, whereas snapping back with `/` (`?`) from a powered faulted pose stamps a one-shot spurious write into `NTARAM` so corrupted background tiles stay visible on screen until overwritten by scrolling, screen transitions, or Reset (`R`).
 - **Cartridge Audio Loop (Pins 45/46 `SND IN/OUT`)**: Modulates [`MacAudioEngine.mm`](../src/audio/MacAudioEngine.mm) pass-through gain (`okusan_get_audio_contact_q`).
 
 ---

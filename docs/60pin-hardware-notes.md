@@ -35,16 +35,17 @@
 - **`tilt` (`-32 .. +32`)** — `<` / `>`：左右傾け。負で左端（PRG/CPU 側）浮き、正で右端（PPU/CHR 側）浮き。
 - **`lift` (`0 .. +16`)** — `Shift + <` / `Shift + >`：垂直引き抜き量（`1 step = 330 µm`、最大 `5.28 mm`）。
 - **`pitch` (`-8 .. +8`)** — `[` / `]`：前後揺らし。負で手前側浮き、正で手前へ倒れて奥側（赤スライダー側）が浮く。
-- **差し直し (`0, 0, 0`)** — `/`（`?`）で即座に全 60 ピンを完全挿入状態へ復帰。
+- **差し直し (`0, 0, 0`)** — `/`（`?`）で即座に全 60 ピンの3軸姿勢・明示的不良マスクを解除し完全挿入状態へ復帰。
+- **ランダム接触不良起動＆スイッチ OFF（`@`）** — 電源 ON 中は本体電源 OFF、電源 OFF 状態から `@` を押すと [`okusan_set_pin_fault_masks`](../third_party/fceumm/src/ppu.c#L555) と任意 3 軸傾きの組合せにより **全 60 ピン（0–59）の位置・本数をランダムに指定** した状態で電源投入（プロファイル固定なし・JIS/US キー両対応）。
 
 ### 2.2 各ピンの幾何位置・接触面積算出
 1. **長手方向位置 `x_um`**：`((pos * 2) - 29) * 1270 µm`（`pos = 0..29`）。
-2. **剛体エッジ浮き `rise_um`**（[`okusan_cart_edge_rise_um`](../third_party/fceumm/src/ppu.c#L344)、[`okusan_cart_pin_rise_um`](../third_party/fceumm/src/ppu.c#L355)）：
+2. **剛体エッジ浮き `rise_um`**（[`okusan_cart_edge_rise_um`](../third_party/fceumm/src/ppu.c#L346)、[`okusan_cart_pin_rise_um`](../third_party/fceumm/src/ppu.c#L357)）：
    $$\text{rise}_{\text{edge}}(x) = 330 \cdot \text{lift} + \frac{|\text{tilt}| \cdot 185 \cdot \text{dist}(x)}{2 \cdot 39000}$$
    $$\text{rise}_{\text{pin}} = \max\!\left(0,\ \text{rise}_{\text{edge}}(x) + \begin{cases} -45 \cdot \text{pitch} & (\text{Front } 1..30) \\ +45 \cdot \text{pitch} & (\text{Back } 31..60) \end{cases}\right)$$
 3. **垂直重なり `ov_v`**（各ピン固有のバネ公差・酸化膜ばらつき `wear_um ∈ [-200, +180] µm` 加算後）：
    $$[\text{pad\_bot}, \text{pad\_top}] = [1000 + \text{rise}_{\text{pin}} + \text{wear},\ 7500 + \text{rise}_{\text{pin}} + \text{wear}] \cap [2500, 4200]$$
-4. **横ズレ重なり幅 `lat_ov_w`**（[`okusan_cart_lat_shift_um`](../third_party/fceumm/src/ppu.c#L367)）：
+4. **横ズレ重なり幅 `lat_ov_w`**（[`okusan_cart_lat_shift_um`](../third_party/fceumm/src/ppu.c#L369)）：
    $$\text{lat\_shift} = \frac{|\text{tilt}| \cdot 185 \cdot \max(800, 3350 - \text{lift}\cdot 165)}{2 \cdot 39000} + \frac{|\text{tilt}| \cdot 350}{32}$$
    $$\text{lat\_ov\_w} = \text{clamp}\!\left(1325 - \text{lat\_shift},\ 0,\ 1100\right)\ \text{µm}$$
    横ズレが `225 µm` までは幅 `100%`（`1100 µm`）、`tilt=32` 時は約 `60.5%` まで減少します。
@@ -87,13 +88,14 @@
 - **CPU バス (`$4020-$FFFF`, `x6502.c`)**
   - [`okusan_cpu_read_cart`](../third_party/fceumm/src/x6502.c#L87)・[`WrMemNorm`](../third_party/fceumm/src/x6502.c#L109)・[`X6502_DMW`](../third_party/fceumm/src/x6502.c#L148) により、`A0..A14`（Pin 2–13, 33–35）・`D0..D7`（Pin 36–43）・`R/W`（Pin 14）・`M2`（Pin 32）を通過（MMC5 `$5xxx`・WRAM `$6000-$7FFF`・PRG/Mapper `$8000-$FFFF` を網羅）。
   - `$8000` 以上は `/ROMSEL`（Pin 44）断で ROM 非選択となり、CPU データバス容量のオープンバス（`X.DB`）を返して不正オペコード（KIL 等）で実 6502 が停止（`X.jammed`）。リセット (`R`)＋差し直し (`/`) で復帰します。
+- **明示的ピン不良マスク（`okusan_set_pin_fault_masks`）**：`open_mask` 指定ピンは `overlap = 0 / OPEN`、`weak_mask` 指定ピンは `overlap = clamp(700 + wear_um, 440, 940) µm / WEAK` を重畳し、物理傾きなし（酸化ピン単体）や傾きとの複合故障を表現します。
 - **外部 `/IRQ`（Pin 15）**
-  - [`okusan_map_irq`](../third_party/fceumm/src/ppu.c#L719) により、本体 2A03 内部の NMI/Reset/APU 割り込みを残したまま外部カートリッジ IRQ（`FCEU_IQEXT | FCEU_IQEXT2`）のみを遮断・トレース。
+  - [`okusan_map_irq`](../third_party/fceumm/src/ppu.c#L758) により、本体 2A03 内部の NMI/Reset/APU 割り込みを残したまま外部カートリッジ IRQ（`FCEU_IQEXT | FCEU_IQEXT2`）のみを遮断・トレース。
 - **PPU パターン・ネームテーブル・`$2007`**
-  - **CHR 読出**：`PPU A0..A13`・`PPU D0..D7`・`PPU /RD`（Pin 17）を通過。`/RD` 断・`PPU A13`（Pin 56）断・通電断時は 2C02 実機 `AD0..AD7` 多重化オープンバス値 **`vadr & 0xFF`**（アドレス数値がそのまま縞模様化する実機特有現象）を返します。
-  - **ネームテーブル／属性読出（[`okusan_read_nt_byte`](../third_party/fceumm/src/ppu.c#L779)）**：`CIRAM A10`（Pin 18）でミラーリングを制御し、`CIRAM /CE`（Pin 48）または `PPU /A13`（Pin 49）断時は本体内 2KB VRAM が非選択になるため、タイル ID・属性テーブル双方へオープンバス **`off & 0xFF`** を返します。
-  - **`$2007` CHR-RAM / CIRAM 書込（[`B2007`](../third_party/fceumm/src/ppu.c#L1140)）**：`PPU /WR`（Pin 47）と `PPU A13` / `CIRAM /CE` / `PPU /A13` で書込可否を独立判定します。
-  - **差し直し（`?` / `/` キー）時の本体 2KB CIRAM（`NTARAM`）残留誤ラッチ（[`okusan_reseat_cart_contact`](../third_party/fceumm/src/ppu.c#L901)）**：`<` / `>` / `[` / `]` 等で斜め位置を変えている間は `NTARAM` を汚さず、**電源 ON（`Vcc >= 3.40 V`）かつ実表示中に `CIRAM` 直接線または 4 本以上の `PPU`/電源ピンが壊れている状態から `?`（`/`）で一気に正常復帰した瞬間だけ**、バス由来パターンの誤書込を `NTARAM` のタイルID／属性へ 1 ショット焼き付けます。これにより「`?` で戻してもその画面の壊れた背景はそのまま残り、スクロール・画面遷移・リセット（`R`）で直る」挙動になります。
+  - **CHR 読出**：`PPU A0..A13`・`PPU D0..D7`・`PPU /RD`（Pin 17）を通過。`/RD` 断・`PPU A13`（Pin 56）断・通電断時は 2C02 実機 `AD0..AD7` 多重化オープンバス値 **`vadr & 0xFF`** を返し、[`okusan_map_ppu_data_bus`](../third_party/fceumm/src/ppu.c#L888) で個別 `PPU D0..D7` 断線時は CMOS/NMOS プルアップ `1` を保持して **8px 周期の縦筋（ジェイルバー）** を再現します。
+  - **ネームテーブル／属性読出（[`okusan_read_nt_byte`](../third_party/fceumm/src/ppu.c#L818)）**：`CIRAM A10`（Pin 18）でミラーリングを制御し、`CIRAM /CE`（Pin 48）または `PPU /A13`（Pin 49）が `OPEN`/`WEAK`/`MARGINAL` のときに本体内 2KB VRAM の非選択・欠落を発生させ、オープンバス **`off & 0xFF`** を返します。
+  - **`$2007` CHR-RAM / CIRAM 書込（[`B2007`](../third_party/fceumm/src/ppu.c#L1186)）**：`PPU /WR`（Pin 47）と `PPU A13` / `CIRAM /CE` / `PPU /A13` で書込可否を独立判定します。
+  - **差し直し（`?` / `/` キー）時の本体 2KB CIRAM（`NTARAM`）残留誤ラッチ（[`okusan_reseat_cart_contact`](../third_party/fceumm/src/ppu.c#L945)）**：`<` / `>` / `[` / `]` 等で斜め位置を変えている間は `NTARAM` を汚さず、**電源 ON（`Vcc >= 3.40 V`）かつ実表示中に `CIRAM` 直接線または 4 本以上の `PPU`/電源ピンが壊れている状態から `?`（`/`）で一気に正常復帰した瞬間だけ**、バス由来パターンの誤書込を `NTARAM` のタイルID／属性へ 1 ショット焼き付けます。これにより「`?` で戻してもその画面の壊れた背景はそのまま残り、スクロール・画面遷移・リセット（`R`）で直る」挙動になります。
 - **カセット音声（Pin 45 `SND IN` / Pin 46 `SND OUT`）**
   - 接触度に応じて `okusan_cached_audio_q`（`0..256`）へ変換し、[`MacAudioEngine.mm`](../src/audio/MacAudioEngine.mm) の通過ゲインに反映します。
 

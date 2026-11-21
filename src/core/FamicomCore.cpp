@@ -98,6 +98,7 @@ struct FamicomCore::CoreState {
     // 60-pin cartridge physics extensions exported by our patched fceumm build
     void (*okusan_set_cart_contact)(int, int) = nullptr;
     void (*okusan_set_cart_contact3)(int, int, int) = nullptr;
+    void (*okusan_set_pin_fault_masks)(uint64_t, uint64_t) = nullptr;
     void (*okusan_reseat_cart_contact)() = nullptr;
     void (*okusan_get_pin_telemetry60)(int *, int *, int *, CartPinReading *, int) = nullptr;
     int (*okusan_cart_edge_rise_um)(int, int, int) = nullptr;
@@ -224,6 +225,7 @@ struct FamicomCore::CoreState {
     void clearCustomSymbols() {
         okusan_set_cart_contact = nullptr;
         okusan_set_cart_contact3 = nullptr;
+        okusan_set_pin_fault_masks = nullptr;
         okusan_reseat_cart_contact = nullptr;
         okusan_get_pin_telemetry60 = nullptr;
         okusan_cart_edge_rise_um = nullptr;
@@ -293,6 +295,7 @@ bool FamicomCore::load(const std::string &coreLibraryPath,
     // Optional extensions (present in our patched fceumm binary).
     resolveSymbol(state_->libraryHandle, "okusan_set_cart_contact", state_->okusan_set_cart_contact);
     resolveSymbol(state_->libraryHandle, "okusan_set_cart_contact3", state_->okusan_set_cart_contact3);
+    resolveSymbol(state_->libraryHandle, "okusan_set_pin_fault_masks", state_->okusan_set_pin_fault_masks);
     resolveSymbol(state_->libraryHandle, "okusan_reseat_cart_contact", state_->okusan_reseat_cart_contact);
     resolveSymbol(state_->libraryHandle, "okusan_get_pin_telemetry60", state_->okusan_get_pin_telemetry60);
     resolveSymbol(state_->libraryHandle, "okusan_cart_edge_rise_um", state_->okusan_cart_edge_rise_um);
@@ -366,6 +369,11 @@ void FamicomCore::setCartridgePose(int tilt, int lift, int pitch) {
     } else if (state_->okusan_set_cart_contact) {
         state_->okusan_set_cart_contact(tilt, lift);
     }
+}
+
+void FamicomCore::setPinFaultMasks(uint64_t weakMask, uint64_t openMask) {
+    if (!state_->loaded || !state_->okusan_set_pin_fault_masks) return;
+    state_->okusan_set_pin_fault_masks(weakMask, openMask);
 }
 
 void FamicomCore::reseatCartridge() {

@@ -49,6 +49,41 @@ struct MacAudioEngine::RingState {
         return freezeRng;
     }
 
+    void synthesizeFallbackFreezeBuzz(FreezeStyle style) {
+        if (style == FreezeStyle::MachineGunStutter) {
+            const size_t stutLen = std::max<size_t>(256, static_cast<size_t>(sampleRateHz * 0.036));
+            freezeLoopL.resize(stutLen);
+            freezeLoopR.resize(stutLen);
+            for (size_t i = 0; i < stutLen; ++i) {
+                const float env = (i < stutLen / 3) ? 0.065f : 0.0f;
+                const float buzz = ((i / 90) & 1u) ? env : -env;
+                freezeLoopL[i] = buzz;
+                freezeLoopR[i] = buzz;
+            }
+            return;
+        }
+        if (style == FreezeStyle::VramGarbage) {
+            const size_t sliceLen = 170 + (nextFreezeRand() % 180);
+            freezeLoopL.resize(sliceLen);
+            freezeLoopR.resize(sliceLen);
+            for (size_t i = 0; i < sliceLen; ++i) {
+                const float square = (i < sliceLen / 2) ? 0.048f : -0.048f;
+                freezeLoopL[i] = square;
+                freezeLoopR[i] = square;
+            }
+            return;
+        }
+        const double hz = (style == FreezeStyle::PaletteCorruption) ? 120.0 : 180.0;
+        const size_t buzzLen = std::max<size_t>(64, static_cast<size_t>(std::round(sampleRateHz / hz)));
+        freezeLoopL.resize(buzzLen);
+        freezeLoopR.resize(buzzLen);
+        for (size_t i = 0; i < buzzLen; ++i) {
+            const float pulse = (i < buzzLen / 4) ? 0.055f : -0.025f;
+            freezeLoopL[i] = pulse;
+            freezeLoopR[i] = pulse;
+        }
+    }
+
     void captureFreezeWaveform(FreezeStyle style, uint32_t seed) {
         freezeCursor = 0;
         freezeStyle = style;
@@ -57,8 +92,7 @@ struct MacAudioEngine::RingState {
         freezeSampleAge = 0;
 
         if (recentValidCount < 256) {
-            freezeLoopL.assign(1, 0.0f);
-            freezeLoopR.assign(1, 0.0f);
+            synthesizeFallbackFreezeBuzz(style);
             return;
         }
 
@@ -87,12 +121,7 @@ struct MacAudioEngine::RingState {
             freezeLoopL.assign(linearL.begin() + static_cast<ptrdiff_t>(start), linearL.end());
             freezeLoopR.assign(linearR.begin() + static_cast<ptrdiff_t>(start), linearR.end());
             if (peak < 0.008f) {
-                for (size_t i = 0; i < stutLen; ++i) {
-                    const float env = (i < stutLen / 3) ? 0.065f : 0.0f;
-                    const float buzz = ((i / 90) & 1u) ? env : -env;
-                    freezeLoopL[i] += buzz;
-                    freezeLoopR[i] += buzz;
-                }
+                synthesizeFallbackFreezeBuzz(style);
             }
             return;
         }
@@ -103,25 +132,14 @@ struct MacAudioEngine::RingState {
             freezeLoopL.assign(linearL.begin() + static_cast<ptrdiff_t>(start), linearL.end());
             freezeLoopR.assign(linearR.begin() + static_cast<ptrdiff_t>(start), linearR.end());
             if (peak < 0.008f) {
-                for (size_t i = 0; i < sliceLen; ++i) {
-                    const float square = (i < sliceLen / 2) ? 0.048f : -0.048f;
-                    freezeLoopL[i] = square;
-                    freezeLoopR[i] = square;
-                }
+                synthesizeFallbackFreezeBuzz(style);
             }
             return;
         }
 
         if (peak < 0.004f) {
             if (style == FreezeStyle::PaletteCorruption) {
-                const size_t buzzLen = std::max<size_t>(64, static_cast<size_t>(std::round(sampleRateHz / 120.0)));
-                freezeLoopL.resize(buzzLen);
-                freezeLoopR.resize(buzzLen);
-                for (size_t i = 0; i < buzzLen; ++i) {
-                    const float pulse = (i < buzzLen / 4) ? 0.055f : -0.025f;
-                    freezeLoopL[i] = pulse;
-                    freezeLoopR[i] = pulse;
-                }
+                synthesizeFallbackFreezeBuzz(style);
             } else {
                 freezeLoopL.assign(1, 0.0f);
                 freezeLoopR.assign(1, 0.0f);
