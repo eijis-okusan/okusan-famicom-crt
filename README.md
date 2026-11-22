@@ -157,7 +157,28 @@ The UI automatically matches your macOS system language on launch, and can be sw
 
 ---
 
-## Repository Layout
+## Repository Layout & Architecture
+
+### Signal & Module Flow
+
+```text
+  FCEUmm Core (third_party/fceumm/src/)
+   ├─ x6502.c / ppu.c / pputile.h  <── 60-Pin Bus Hooks ──>  okusan_cart.c / okusan_cart.h
+   │                                                          (3-DOF geometry, Vcc, XTALK, telemetry)
+   ▼ (256x240 RGB565 video, 48 kHz APU PCM, 60-pin telemetry)
+  C++17 Core Engine (src/core/, Zero Cocoa deps)
+   ├─ FamicomCore              (libretro loader, run/reset, savestate, 60-pin API)
+   └─ CartridgeFaultInjector   (cold-boot 60-pin fault synthesizer & boot prober)
+   ▼
+  macOS Presentation Layer (src/{app,audio,video,hud,input}/)
+   ├─ AppDelegate + AppMenuController + AppPreferences + LicensesWindow + AppLocalization
+   ├─ CrtScreenView + FreezeFrameGenerator + GLSL Shaders (2-pass beamload & CRT/RF/P4)
+   ├─ CartConnectorHud         (1:1 mm socket cutaway & live pin bus inspector)
+   ├─ MacAudioEngine + TvSpeakerDsp.hpp (CoreAudio + paper-cone EQ / intercarrier buzz)
+   └─ InputBindings + ControllerSettingsWindow (keyboard + GameController)
+```
+
+### Directory Tree
 
 ```text
 .
@@ -172,21 +193,21 @@ The UI automatically matches your macOS system language on launch, and can be sw
 │   ├── AppIcon.icns                # macOS app icon
 │   └── Info.plist                  # Bundle metadata (v0.5)
 ├── src/
-│   ├── app/                        # main.mm, AppDelegate (menus/history/pacing), AppLocalization
+│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, LicensesWindow, AppLocalization
 │   ├── core/                       # FamicomCore & CartridgeFaultInjector (pure C++17 libretro/60-pin API)
 │   ├── audio/                      # TvSpeakerDsp.hpp (pure C++17) & MacAudioEngine (CoreAudio)
-│   ├── video/                      # CrtScreenView (OpenGL 2-pass renderer & HUD overlay blit)
+│   ├── video/                      # FreezeFrameGenerator (pure C++17) & CrtScreenView (OpenGL 2-pass CRT renderer)
 │   ├── hud/                        # CartConnectorHud (CoreGraphics 1:1 mm connector & inspector)
 │   └── input/                      # InputBindings & ControllerSettingsWindow
 ├── third_party/
-│   └── fceumm/                     # Modified libretro-fceumm core source (60-pin/CPU/PPU hooks)
+│   └── fceumm/                     # Modified libretro-fceumm core source (okusan_cart.c/.h + CPU/PPU hooks)
 ├── LICENSE                         # GNU General Public License v2.0
 ├── Makefile
 ├── README.md
 └── README.ja.md
 ```
 
-**Cross-platform note**: `src/core/`, `src/audio/TvSpeakerDsp.hpp`, `resources/shaders/`, and `third_party/fceumm/` have zero Cocoa dependencies, making it straightforward to add a Windows/Linux frontend (e.g., via SDL2 + CMake) in future releases.
+**Cross-platform note**: `src/core/`, `src/video/FreezeFrameGenerator.{hpp,cpp}`, `src/audio/TvSpeakerDsp.hpp`, `resources/shaders/`, and `third_party/fceumm/` have zero Cocoa dependencies, making it straightforward to add a Windows/Linux frontend (e.g., via SDL2 + CMake) in future releases.
 
 ---
 
@@ -194,7 +215,7 @@ The UI automatically matches your macOS system language on launch, and can be sw
 
 This repository incorporates a modified version of **[libretro-fceumm](https://github.com/libretro/libretro-fceumm)** and is licensed under the **GNU General Public License v2.0** (see [`LICENSE`](LICENSE)).
 
-- **FCEUmm (libretro)** — NES/Famicom core based on FCE Ultra / FCEU-mm by Xodnizel, CaH4e3, BERO, and libretro contributors (GNU GPL v2.0; modified in `src/okusan_cart.h`, `src/ppu.c`, `src/ppu.h`, `src/pputile.h`, and `src/x6502.c`)
+- **FCEUmm (libretro)** — NES/Famicom core based on FCE Ultra / FCEU-mm by Xodnizel, CaH4e3, BERO, and libretro contributors (GNU GPL v2.0; extended with `src/okusan_cart.h`, `src/okusan_cart.c`, `Makefile.common`, `src/ppu.c`, `src/ppu.h`, `src/pputile.h`, and `src/x6502.c`)
 - **libretro API & libretro-common** — Bundled inside `third_party/fceumm` (MIT License)
 - **nes_ntsc** (Shay Green / Blargg) & **EMU2413** (Mitsutaka Okazaki) — Bundled inside `third_party/fceumm`
 

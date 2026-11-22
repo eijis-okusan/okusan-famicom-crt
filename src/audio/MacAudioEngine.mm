@@ -84,6 +84,66 @@ struct MacAudioEngine::RingState {
         }
     }
 
+    size_t estimateDominantPeriodAmdf(const std::vector<float> &linearL,
+                                      const std::vector<float> &linearR) const {
+        const size_t count = linearL.size();
+        const size_t window = std::min<size_t>(256, count / 3);
+        const size_t maxPeriod = std::min<size_t>(800, count - window - 8);
+        size_t bestPeriod = std::min<size_t>(240, maxPeriod);
+        double lowestError = std::numeric_limits<double>::max();
+
+        // AMDF over [64..800] samples (~750..60 Hz) picks the fundamental loop pitch.
+        for (size_t period = 64; period <= maxPeriod; ++period) {
+            double error = 0.0;
+            for (size_t j = 0; j < window; ++j) {
+                const float cur = 0.5f * (linearL[count - 1 - j] + linearR[count - 1 - j]);
+                const float lagged = 0.5f * (linearL[count - 1 - j - period] + linearR[count - 1 - j - period]);
+                error += std::abs(cur - lagged);
+            }
+            // Slight bias against subharmonics/multiples unless genuinely cleaner.
+            error *= (1.0 + 0.00015 * static_cast<double>(period));
+            if (error < lowestError) {
+                lowestError = error;
+                bestPeriod = period;
+            }
+        }
+        return bestPeriod;
+    }
+
+    void extractSeamlessPeriodLoop(const std::vector<float> &linearL,
+                                   const std::vector<float> &linearR,
+                                   size_t bestPeriod) {
+        const size_t count = linearL.size();
+        size_t loopEnd = count - 1;
+        const size_t searchFloor = (count > bestPeriod + 32)
+            ? std::max(count - 256, bestPeriod)
+            : bestPeriod;
+
+        // Snap loop boundary to an upward zero-crossing to avoid wraparound clicks.
+        for (size_t i = count - 2; i > searchFloor; --i) {
+            const float prev = 0.5f * (linearL[i - 1] + linearR[i - 1]);
+            const float curr = 0.5f * (linearL[i] + linearR[i]);
+            if (prev <= 0.0f && curr > 0.0f) {
+                loopEnd = i;
+                break;
+            }
+        }
+
+        const size_t loopStart = (loopEnd >= bestPeriod) ? (loopEnd - bestPeriod) : 0;
+        const size_t loopLen = std::max<size_t>(1, loopEnd - loopStart);
+        freezeLoopL.assign(linearL.begin() + static_cast<ptrdiff_t>(loopStart),
+                           linearL.begin() + static_cast<ptrdiff_t>(loopStart + loopLen));
+        freezeLoopR.assign(linearR.begin() + static_cast<ptrdiff_t>(loopStart),
+                           linearR.begin() + static_cast<ptrdiff_t>(loopStart + loopLen));
+
+        const size_t seamSamples = std::min<size_t>(4, loopLen / 4);
+        for (size_t i = 0; i < seamSamples; ++i) {
+            const float alpha = static_cast<float>(i + 1) / static_cast<float>(seamSamples + 1);
+            freezeLoopL[i] = freezeLoopL[loopLen - 1] * (1.0f - alpha) + freezeLoopL[i] * alpha;
+            freezeLoopR[i] = freezeLoopR[loopLen - 1] * (1.0f - alpha) + freezeLoopR[i] * alpha;
+        }
+    }
+
     void captureFreezeWaveform(FreezeStyle style, uint32_t seed) {
         freezeCursor = 0;
         freezeStyle = style;
@@ -111,23 +171,16 @@ struct MacAudioEngine::RingState {
             peak = std::max(peak, std::max(std::abs(linearL[i]), std::abs(linearR[i])));
         }
 
-        if (style == FreezeStyle::MachineGunStutter) {
-            // Grab ~28-56 ms verbatim without zero-cross smoothing for choppy CPU-loop stutter.
-            const size_t minStut = std::min<size_t>(count, static_cast<size_t>(sampleRateHz * 0.028));
-            const size_t maxStut = std::min<size_t>(count, static_cast<size_t>(sampleRateHz * 0.056));
-            const size_t span = std::max<size_t>(1, maxStut - minStut);
-            const size_t stutLen = std::max<size_t>(256, minStut + (nextFreezeRand() % span));
-            const size_t start = count - stutLen;
-            freezeLoopL.assign(linearL.begin() + static_cast<ptrdiff_t>(start), linearL.end());
-            freezeLoopR.assign(linearR.begin() + static_cast<ptrdiff_t>(start), linearR.end());
-            if (peak < 0.008f) {
-                synthesizeFallbackFreezeBuzz(style);
+        if (style == FreezeStyle::MachineGunStutter || style == FreezeStyle::VramGarbage) {
+            size_t sliceLen = 0;
+            if (style == FreezeStyle::MachineGunStutter) {
+                const size_t minStut = std::min<size_t>(count, static_cast<size_t>(sampleRateHz * 0.028));
+                const size_t maxStut = std::min<size_t>(count, static_cast<size_t>(sampleRateHz * 0.056));
+                const size_t span = std::max<size_t>(1, maxStut - minStut);
+                sliceLen = std::max<size_t>(256, minStut + (nextFreezeRand() % span));
+            } else {
+                sliceLen = std::min<size_t>(count, 170 + (nextFreezeRand() % 180));
             }
-            return;
-        }
-
-        if (style == FreezeStyle::VramGarbage) {
-            const size_t sliceLen = std::min<size_t>(count, 170 + (nextFreezeRand() % 180));
             const size_t start = count - sliceLen;
             freezeLoopL.assign(linearL.begin() + static_cast<ptrdiff_t>(start), linearL.end());
             freezeLoopR.assign(linearR.begin() + static_cast<ptrdiff_t>(start), linearR.end());
@@ -147,55 +200,8 @@ struct MacAudioEngine::RingState {
             return;
         }
 
-        // Estimate dominant pitch period in [64..800] samples (~750..60 Hz) via AMDF.
-        const size_t window = std::min<size_t>(256, count / 3);
-        const size_t maxPeriod = std::min<size_t>(800, count - window - 8);
-        size_t bestPeriod = std::min<size_t>(240, maxPeriod);
-        double lowestError = std::numeric_limits<double>::max();
-
-        for (size_t period = 64; period <= maxPeriod; ++period) {
-            double error = 0.0;
-            for (size_t j = 0; j < window; ++j) {
-                const float cur = 0.5f * (linearL[count - 1 - j] + linearR[count - 1 - j]);
-                const float lagged = 0.5f * (linearL[count - 1 - j - period] + linearR[count - 1 - j - period]);
-                error += std::abs(cur - lagged);
-            }
-            // Slight penalty against multiples/subharmonics unless genuinely cleaner.
-            error *= (1.0 + 0.00015 * static_cast<double>(period));
-            if (error < lowestError) {
-                lowestError = error;
-                bestPeriod = period;
-            }
-        }
-
-        // Align loop end to an upward zero-crossing to eliminate wraparound clicks.
-        size_t loopEnd = count - 1;
-        const size_t searchFloor = (count > bestPeriod + 32)
-            ? std::max(count - 256, bestPeriod)
-            : bestPeriod;
-        for (size_t i = count - 2; i > searchFloor; --i) {
-            const float prev = 0.5f * (linearL[i - 1] + linearR[i - 1]);
-            const float curr = 0.5f * (linearL[i] + linearR[i]);
-            if (prev <= 0.0f && curr > 0.0f) {
-                loopEnd = i;
-                break;
-            }
-        }
-
-        const size_t loopStart = (loopEnd >= bestPeriod) ? (loopEnd - bestPeriod) : 0;
-        const size_t loopLen = std::max<size_t>(1, loopEnd - loopStart);
-        freezeLoopL.assign(linearL.begin() + static_cast<ptrdiff_t>(loopStart),
-                           linearL.begin() + static_cast<ptrdiff_t>(loopStart + loopLen));
-        freezeLoopR.assign(linearR.begin() + static_cast<ptrdiff_t>(loopStart),
-                           linearR.begin() + static_cast<ptrdiff_t>(loopStart + loopLen));
-
-        // 4-sample micro-crossfade across the loop seam.
-        const size_t seamSamples = std::min<size_t>(4, loopLen / 4);
-        for (size_t i = 0; i < seamSamples; ++i) {
-            const float alpha = static_cast<float>(i + 1) / static_cast<float>(seamSamples + 1);
-            freezeLoopL[i] = freezeLoopL[loopLen - 1] * (1.0f - alpha) + freezeLoopL[i] * alpha;
-            freezeLoopR[i] = freezeLoopR[loopLen - 1] * (1.0f - alpha) + freezeLoopR[i] * alpha;
-        }
+        const size_t bestPeriod = estimateDominantPeriodAmdf(linearL, linearR);
+        extractSeamlessPeriodLoop(linearL, linearR, bestPeriod);
     }
 
     void pushSamples(const int16_t *interleavedStereo, size_t frameCount, bool useFreezeLoop) {

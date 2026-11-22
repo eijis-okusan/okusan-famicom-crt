@@ -1,6 +1,7 @@
 #import "CrtScreenView.hpp"
 #import "core/FamicomCore.hpp"
 #import "hud/CartConnectorHud.hpp"
+#import "video/FreezeFrameGenerator.hpp"
 
 #import <OpenGL/gl.h>
 #import <OpenGL/glext.h>
@@ -169,15 +170,8 @@ GLuint createFrameTexture() {
     BOOL _hudCachedJammed;
     BOOL _hudNeedsRefresh;
 
-    // Synthetic crash-screen frame buffers so toggling freeze off restores the live game untouched
-    BOOL _freezeActive;
-    FreezeStyle _freezeStyle;
-    uint32_t _freezeRng;
-    int _freezeTick;
-    unsigned _freezeWidth;
-    unsigned _freezeHeight;
-    std::vector<uint32_t> _freezeFrameA;
-    std::vector<uint32_t> _freezeFrameB;
+    // Synthetic crash-screen generator so toggling freeze off restores the live game untouched
+    FreezeFrameGenerator _freezeGenerator;
 }
 
 + (NSOpenGLPixelFormat *)defaultPixelFormat {
@@ -269,25 +263,11 @@ GLuint createFrameTexture() {
     [self requestRedraw];
 }
 
-static uint32_t nextFreezeVisualRng(uint32_t &state) {
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-    return state;
-}
-
-static uint32_t scalePixelRgb(uint32_t pixel, float rMul, float gMul, float bMul) {
-    const uint32_t r = static_cast<uint32_t>(std::clamp(((pixel >> 16) & 0xFFu) * rMul, 0.0f, 255.0f));
-    const uint32_t g = static_cast<uint32_t>(std::clamp(((pixel >> 8) & 0xFFu) * gMul, 0.0f, 255.0f));
-    const uint32_t b = static_cast<uint32_t>(std::clamp((pixel & 0xFFu) * bMul, 0.0f, 255.0f));
-    return 0xFF000000u | (r << 16) | (g << 8) | b;
-}
-
 - (void)setFreezeEffect:(FreezeStyle)style seed:(uint32_t)seed active:(BOOL)active {
     if (!_core) return;
     if (!active) {
-        const BOOL wasActive = _freezeActive;
-        _freezeActive = NO;
+        const BOOL wasActive = _freezeGenerator.active() ? YES : NO;
+        _freezeGenerator.clear();
         if (wasActive && _core->isLoaded()) {
             [self ensureGLReady];
             [self.openGLContext makeCurrentContext];
@@ -300,134 +280,34 @@ static uint32_t scalePixelRgb(uint32_t pixel, float rMul, float gMul, float bMul
         return;
     }
 
-    const unsigned width = _core->width();
-    const unsigned height = _core->height();
-    const uint32_t *cur = _core->currentPixels();
-    const uint32_t *prev = _core->previousPixels();
-    if (!cur || width == 0 || height == 0) return;
-
-    _freezeActive = YES;
-    _freezeStyle = style;
-    _freezeRng = seed ? seed : 0xCAFEBABEu;
-    _freezeTick = 0;
-    _freezeWidth = width;
-    _freezeHeight = height;
-
-    const size_t pixelCount = static_cast<size_t>(width) * height;
-    _freezeFrameA.assign(cur, cur + pixelCount);
-
-    if (style == FreezeStyle::CleanTone) {
-        [self triggerFreezeGlitch];
-        return;
+    _freezeGenerator.capture(style, seed, _core->width(), _core->height(),
+                             _core->currentPixels(), _core->previousPixels());
+    if (style != FreezeStyle::CleanTone && style != FreezeStyle::MachineGunStutter &&
+        _freezeGenerator.width() > 0 && _freezeGenerator.height() > 0) {
+        [self ensureGLReady];
+        [self.openGLContext makeCurrentContext];
+        [self uploadTopDownPixels:_freezeGenerator.primaryPixels()
+                        toTexture:_currentFrameTex
+                            width:_freezeGenerator.width()
+                           height:_freezeGenerator.height()];
+        [self uploadTopDownPixels:_freezeGenerator.primaryPixels()
+                        toTexture:_previousFrameTex
+                            width:_freezeGenerator.width()
+                           height:_freezeGenerator.height()];
     }
-
-    if (style == FreezeStyle::MachineGunStutter) {
-        _freezeFrameB.assign(prev ? prev : cur, (prev ? prev : cur) + pixelCount);
-        const unsigned splitY = 48u + (nextFreezeVisualRng(_freezeRng) % std::max(1u, height - 96u));
-        const unsigned shiftX = 2u + (nextFreezeVisualRng(_freezeRng) % 7u);
-        for (unsigned y = splitY; y < height; ++y) {
-            uint32_t *row = _freezeFrameB.data() + static_cast<size_t>(y) * width;
-            std::rotate(row, row + (shiftX % width), row + width);
-        }
-        [self triggerFreezeGlitch];
-        return;
-    }
-
-    if (style == FreezeStyle::PaletteCorruption) {
-        const uint32_t mode = nextFreezeVisualRng(_freezeRng) % 4u;
-        const unsigned splitY = 32u + (nextFreezeVisualRng(_freezeRng) % std::max(1u, height - 64u));
-        const unsigned splitShift = (nextFreezeVisualRng(_freezeRng) & 1u)
-            ? (4u + (nextFreezeVisualRng(_freezeRng) % 28u))
-            : 0u;
-        for (unsigned y = 0; y < height; ++y) {
-            uint32_t *row = _freezeFrameA.data() + static_cast<size_t>(y) * width;
-            if (y >= splitY && splitShift > 0) {
-                std::rotate(row, row + (splitShift % width), row + width);
-            }
-            const unsigned band = (y >> 4) & 3u;
-            for (unsigned x = 0; x < width; ++x) {
-                const uint32_t pixel = row[x];
-                if (mode == 0) {
-                    row[x] = scalePixelRgb(pixel, 1.38f, 0.36f, 0.36f);
-                } else if (mode == 1) {
-                    row[x] = scalePixelRgb(pixel, 0.36f, 0.48f, 1.42f);
-                } else if (mode == 2) {
-                    const uint32_t r = (pixel >> 16) & 0xFFu;
-                    const uint32_t g = (pixel >> 8) & 0xFFu;
-                    const uint32_t b = pixel & 0xFFu;
-                    row[x] = 0xFF000000u | (g << 16) | (b << 8) | (r ^ 0xFFu);
-                } else {
-                    const uint32_t xorMask = (band == 0) ? 0x00FF00FFu
-                        : ((band == 1) ? 0x0000FFFFu : ((band == 2) ? 0x00FFFF00u : 0x0033CC66u));
-                    row[x] = 0xFF000000u | ((pixel ^ xorMask) & 0x00FFFFFFu);
-                }
-            }
-        }
-    } else if (style == FreezeStyle::VramGarbage) {
-        const unsigned cols = width / 8u;
-        const unsigned rows = height / 8u;
-        std::vector<uint32_t> sourceTiles;
-        for (unsigned t = 0; t < 48 && cols > 0 && rows > 0; ++t) {
-            const unsigned tx = nextFreezeVisualRng(_freezeRng) % cols;
-            const unsigned ty = nextFreezeVisualRng(_freezeRng) % rows;
-            sourceTiles.push_back(tx | (ty << 16));
-        }
-        if (!sourceTiles.empty()) {
-            for (int copy = 0; copy < 76; ++copy) {
-                const uint32_t packed = sourceTiles[nextFreezeVisualRng(_freezeRng) % sourceTiles.size()];
-                const unsigned sx = (packed & 0xFFFFu) * 8u;
-                const unsigned sy = (packed >> 16) * 8u;
-                const unsigned dx = (nextFreezeVisualRng(_freezeRng) % cols) * 8u;
-                const unsigned dy = (nextFreezeVisualRng(_freezeRng) % rows) * 8u;
-                for (unsigned py = 0; py < 8; ++py) {
-                    for (unsigned px = 0; px < 8; ++px) {
-                        _freezeFrameA[static_cast<size_t>(dy + py) * width + (dx + px)] =
-                            cur[static_cast<size_t>(sy + py) * width + (sx + px)];
-                    }
-                }
-            }
-        }
-        for (int blk = 0; blk < 28 && cols > 0 && rows > 0; ++blk) {
-            const unsigned dx = (nextFreezeVisualRng(_freezeRng) % cols) * 8u;
-            const unsigned dy = (nextFreezeVisualRng(_freezeRng) % rows) * 8u;
-            const uint32_t colA = _freezeFrameA[static_cast<size_t>(nextFreezeVisualRng(_freezeRng) % height) * width
-                                                + (nextFreezeVisualRng(_freezeRng) % width)];
-            const uint32_t colB = cur[static_cast<size_t>(nextFreezeVisualRng(_freezeRng) % height) * width
-                                      + (nextFreezeVisualRng(_freezeRng) % width)] ^ 0x0055AA33u;
-            const uint32_t pattern = nextFreezeVisualRng(_freezeRng);
-            for (unsigned py = 0; py < 8; ++py) {
-                for (unsigned px = 0; px < 8; ++px) {
-                    const bool bit = ((pattern >> ((py + px) & 15u)) & 1u) != 0;
-                    _freezeFrameA[static_cast<size_t>(dy + py) * width + (dx + px)] =
-                        0xFF000000u | ((bit ? colB : colA) & 0x00FFFFFFu);
-                }
-            }
-        }
-    }
-
-    [self ensureGLReady];
-    [self.openGLContext makeCurrentContext];
-    [self uploadTopDownPixels:_freezeFrameA.data() toTexture:_currentFrameTex width:width height:height];
-    [self uploadTopDownPixels:_freezeFrameA.data() toTexture:_previousFrameTex width:width height:height];
     [self triggerFreezeGlitch];
 }
 
 - (void)advanceFreezeEffect {
     ++_frameCounter;
-    if (_freezeActive && _freezeWidth > 0 && _freezeHeight > 0) {
-        ++_freezeTick;
-        if (_freezeStyle == FreezeStyle::MachineGunStutter && !_freezeFrameA.empty() && !_freezeFrameB.empty()) {
-            if ((_freezeTick % 2) == 0) {
-                const bool useAlt = ((_freezeTick / 2) & 1) != 0;
-                [self ensureGLReady];
-                [self.openGLContext makeCurrentContext];
-                std::swap(_currentFrameTex, _previousFrameTex);
-                [self uploadTopDownPixels:(useAlt ? _freezeFrameB.data() : _freezeFrameA.data())
-                                toTexture:_currentFrameTex
-                                    width:_freezeWidth
-                                   height:_freezeHeight];
-            }
-        }
+    if (_freezeGenerator.advanceFrameAndShouldUpload()) {
+        [self ensureGLReady];
+        [self.openGLContext makeCurrentContext];
+        std::swap(_currentFrameTex, _previousFrameTex);
+        [self uploadTopDownPixels:_freezeGenerator.activeDisplayPixels()
+                        toTexture:_currentFrameTex
+                            width:_freezeGenerator.width()
+                           height:_freezeGenerator.height()];
     }
     [self setNeedsDisplay:YES];
 }
@@ -692,34 +572,56 @@ static uint32_t scalePixelRgb(uint32_t pixel, float rMul, float gMul, float bMul
     }
 }
 
-- (void)renderFrameAtBackingWidth:(GLsizei)backingW height:(GLsizei)backingH {
-    if (!_glInitialized || !_beamLoadProg || !_core) {
-        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
-        glViewport(0, 0, backingW, backingH);
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        return;
-    }
-
-    // Center a 4:3 television picture inside the window.
+- (void)computeFitted4x3ViewportForWidth:(GLsizei)backingW
+                                 height:(GLsizei)backingH
+                                   outX:(GLint *)outX
+                                   outY:(GLint *)outY
+                                   outW:(GLsizei *)outW
+                                   outH:(GLsizei *)outH {
     const double targetAspect = 4.0 / 3.0;
     const double viewAspect = (backingH > 0) ? ((double)backingW / (double)backingH) : targetAspect;
-    GLint viewX = 0, viewY = 0;
-    GLsizei viewW = backingW, viewH = backingH;
+    *outX = 0;
+    *outY = 0;
+    *outW = backingW;
+    *outH = backingH;
     if (viewAspect > targetAspect) {
-        viewW = (GLsizei)(backingH * targetAspect + 0.5);
-        viewX = (backingW - viewW) / 2;
+        *outW = (GLsizei)(backingH * targetAspect + 0.5);
+        *outX = (backingW - *outW) / 2;
     } else if (viewAspect < targetAspect) {
-        viewH = (GLsizei)(backingW / targetAspect + 0.5);
-        viewY = (backingH - viewH) / 2;
+        *outH = (GLsizei)(backingW / targetAspect + 0.5);
+        *outY = (backingH - *outH) / 2;
     }
+}
 
-    const float inputW = (float)_core->width();
-    const float inputH = (float)_core->height();
-    const float texW = 512.0f;
-    const float texH = 256.0f;
+- (void)computeRfStandby:(float *)outStandbySnow jitter:(float *)outPowerJitter cartPowered:(BOOL)cartPowered {
+    const double powerAge = CFAbsoluteTimeGetCurrent() - _powerSwitchTime;
+    float standbySnow = 0.0f;
+    float powerJitter = 0.0f;
 
-    // Pass 0: downsample frame luma into 32x32 float FBO for HV bloom/beam-load estimation.
+    if (!_consolePowered) {
+        if (powerAge < 0.085) {
+            powerJitter = 1.0f - static_cast<float>(powerAge / 0.085);
+        } else {
+            standbySnow = 1.0f;
+        }
+    } else if (!cartPowered) {
+        // Browned-out or disconnected cartridge power cuts the video modulator carrier.
+        standbySnow = 1.0f;
+    } else {
+        if (powerAge < 0.16) {
+            powerJitter = std::exp(-static_cast<float>(powerAge) * 16.0f);
+        }
+        const double bumpAge = CFAbsoluteTimeGetCurrent() - _transientTime;
+        if (_transientPeak > 0.0f && bumpAge >= 0.0 && bumpAge < 0.14) {
+            powerJitter = std::max(powerJitter,
+                                   _transientPeak * std::exp(-static_cast<float>(bumpAge) * _transientDecay));
+        }
+    }
+    *outStandbySnow = standbySnow;
+    *outPowerJitter = powerJitter;
+}
+
+- (void)renderBeamLoadPassWithInputW:(float)inputW inputH:(float)inputH {
     glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, _beamLoadFbo);
     glViewport(0, 0, 32, 32);
     glUseProgram(_beamLoadProg);
@@ -729,10 +631,29 @@ static uint32_t scalePixelRgb(uint32_t pixel, float rMul, float gMul, float bMul
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, _previousFrameTex);
     glUniform1i(glGetUniformLocation(_beamLoadProg, "PrevTexture"), 1);
     glUniform2f(glGetUniformLocation(_beamLoadProg, "OrigInputSize"), inputW, inputH);
-    glUniform2f(glGetUniformLocation(_beamLoadProg, "OrigTextureSize"), texW, texH);
+    glUniform2f(glGetUniformLocation(_beamLoadProg, "OrigTextureSize"), 512.0f, 256.0f);
     glUniform2f(glGetUniformLocation(_beamLoadProg, "PrevInputSize"), inputW, inputH);
-    glUniform2f(glGetUniformLocation(_beamLoadProg, "PrevTextureSize"), texW, texH);
+    glUniform2f(glGetUniformLocation(_beamLoadProg, "PrevTextureSize"), 512.0f, 256.0f);
     drawFullscreenQuad();
+}
+
+- (void)renderFrameAtBackingWidth:(GLsizei)backingW height:(GLsizei)backingH {
+    if (!_glInitialized || !_beamLoadProg || !_core) {
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+        glViewport(0, 0, backingW, backingH);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        return;
+    }
+
+    GLint viewX = 0, viewY = 0;
+    GLsizei viewW = backingW, viewH = backingH;
+    [self computeFitted4x3ViewportForWidth:backingW height:backingH
+                                      outX:&viewX outY:&viewY outW:&viewW outH:&viewH];
+
+    const float inputW = (float)_core->width();
+    const float inputH = (float)_core->height();
+    [self renderBeamLoadPassWithInputW:inputW inputH:inputH];
 
     const BOOL cartPowered = _core->isLoaded() && _core->isCartridgePowered();
     if (!_displayConfig.rfMode && (!cartPowered || !_consolePowered)) {
@@ -767,7 +688,7 @@ static uint32_t scalePixelRgb(uint32_t pixel, float rMul, float gMul, float bMul
             glUniform2f(glGetUniformLocation(displayProg, "InputSize"), 32.0f, 32.0f);
             glUniform2f(glGetUniformLocation(displayProg, "TextureSize"), 32.0f, 32.0f);
             glUniform2f(glGetUniformLocation(displayProg, "OrigInputSize"), inputW, inputH);
-            glUniform2f(glGetUniformLocation(displayProg, "OrigTextureSize"), texW, texH);
+            glUniform2f(glGetUniformLocation(displayProg, "OrigTextureSize"), 512.0f, 256.0f);
             glUniform2f(glGetUniformLocation(displayProg, "OutputSize"), (float)safeW, (float)safeH);
             glUniform1i(glGetUniformLocation(displayProg, "FrameCount"), _frameCounter);
 
@@ -777,28 +698,9 @@ static uint32_t scalePixelRgb(uint32_t pixel, float rMul, float gMul, float bMul
             glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_MASK_STRENGTH"), _displayConfig.slotMask);
 
             if (_displayConfig.rfMode) {
-                const double powerAge = CFAbsoluteTimeGetCurrent() - _powerSwitchTime;
                 float standbySnow = 0.0f;
                 float powerJitter = 0.0f;
-                if (!_consolePowered) {
-                    if (powerAge < 0.085) {
-                        powerJitter = 1.0f - static_cast<float>(powerAge / 0.085);
-                    } else {
-                        standbySnow = 1.0f;
-                    }
-                } else if (!cartPowered) {
-                    // Browned-out or disconnected cartridge power cuts the video modulator carrier.
-                    standbySnow = 1.0f;
-                } else {
-                    if (powerAge < 0.16) {
-                        powerJitter = std::exp(-static_cast<float>(powerAge) * 16.0f);
-                    }
-                    const double bumpAge = CFAbsoluteTimeGetCurrent() - _transientTime;
-                    if (_transientPeak > 0.0f && bumpAge >= 0.0 && bumpAge < 0.14) {
-                        powerJitter = std::max(powerJitter,
-                                               _transientPeak * std::exp(-static_cast<float>(bumpAge) * _transientDecay));
-                    }
-                }
+                [self computeRfStandby:&standbySnow jitter:&powerJitter cartPowered:cartPowered];
                 glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_RF_SNOW"), _displayConfig.rfSnow);
                 glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_RF_SIGNAL"), _displayConfig.rfSignal);
                 glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_RF_STANDBY_SNOW"), standbySnow);

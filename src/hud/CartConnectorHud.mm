@@ -326,28 +326,18 @@ void drawSocketCrossSection(CGContextRef ctx,
     const CGFloat slantX = -((yRight - yLeft) / (cardRightX - cardLeftX)) * boardHeight;
 
     // Cartridge FR4 PCB body
-    CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, cardLeftX + 0.6 * kPixelsPerMm, yLeft);
-    CGContextAddLineToPoint(ctx, cardRightX - 0.6 * kPixelsPerMm, yRight);
-    CGContextAddLineToPoint(ctx, cardRightX, yRight + 0.8 * kPixelsPerMm);
-    CGContextAddLineToPoint(ctx, cardRightX + slantX, yRight + boardHeight);
-    CGContextAddLineToPoint(ctx, cardLeftX + slantX, yLeft + boardHeight);
-    CGContextAddLineToPoint(ctx, cardLeftX, yLeft + 0.8 * kPixelsPerMm);
-    CGContextClosePath(ctx);
     CGContextSetRGBFillColor(ctx, 0.14, 0.32, 0.22, 0.38);
-    CGContextDrawPath(ctx, kCGPathFillStroke);
-
-    CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, cardLeftX + 0.6 * kPixelsPerMm, yLeft);
-    CGContextAddLineToPoint(ctx, cardRightX - 0.6 * kPixelsPerMm, yRight);
-    CGContextAddLineToPoint(ctx, cardRightX, yRight + 0.8 * kPixelsPerMm);
-    CGContextAddLineToPoint(ctx, cardRightX + slantX, yRight + boardHeight);
-    CGContextAddLineToPoint(ctx, cardLeftX + slantX, yLeft + boardHeight);
-    CGContextAddLineToPoint(ctx, cardLeftX, yLeft + 0.8 * kPixelsPerMm);
-    CGContextClosePath(ctx);
     CGContextSetRGBStrokeColor(ctx, 0.68, 0.86, 0.76, 0.80);
     CGContextSetLineWidth(ctx, 1.2);
-    CGContextStrokePath(ctx);
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, cardLeftX + 0.6 * kPixelsPerMm, yLeft);
+    CGContextAddLineToPoint(ctx, cardRightX - 0.6 * kPixelsPerMm, yRight);
+    CGContextAddLineToPoint(ctx, cardRightX, yRight + 0.8 * kPixelsPerMm);
+    CGContextAddLineToPoint(ctx, cardRightX + slantX, yRight + boardHeight);
+    CGContextAddLineToPoint(ctx, cardLeftX + slantX, yLeft + boardHeight);
+    CGContextAddLineToPoint(ctx, cardLeftX, yLeft + 0.8 * kPixelsPerMm);
+    CGContextClosePath(ctx);
+    CGContextDrawPath(ctx, kCGPathFillStroke);
 
     for (int pos = 0; pos < 30; ++pos) {
         const CGFloat frac = (pos * kPinPitchMm + (kCardWidthMm - 29.0 * kPinPitchMm) * 0.5) / kCardWidthMm;
@@ -482,22 +472,43 @@ void drawPinRow(CGContextRef ctx, int basePinIndex, CGFloat y, int inspectedPin,
     }
 }
 
-void drawPinMatrixAndInspector(CGContextRef ctx, int selectedPin, BOOL japanese, const CartPinReading *pins) {
-    const HudTextPalette &palette = textPalette();
+int pickDefaultInspectedPin(int selectedPin, const CartPinReading *pins) {
+    if (selectedPin >= 0 && selectedPin < 60) return selectedPin;
 
-    // Auto-select the worst faulted pin until the user explicitly clicks a pin.
-    int inspectedPin = selectedPin;
-    if (inspectedPin < 0 || inspectedPin >= 60) {
-        inspectedPin = 21;
-        uint8_t worstState = 0;
-        for (int i = 0; i < 60; ++i) {
-            const uint8_t contact = pins[i].contactState & 0x0Fu;
-            if (contact > worstState) {
-                worstState = contact;
-                inspectedPin = i;
-            }
+    // Auto-focus the worst degraded pin so users immediately see the primary cause of any glitch.
+    int worstPin = 21;
+    uint8_t worstState = 0;
+    for (int i = 0; i < 60; ++i) {
+        const uint8_t contact = pins[i].contactState & 0x0Fu;
+        if (contact > worstState) {
+            worstState = contact;
+            worstPin = i;
         }
     }
+    return worstPin;
+}
+
+NSString *localizedContactLabel(uint8_t contactCode, BOOL japanese) {
+    switch (contactCode) {
+    case 0:  return japanese ? @"接続OK"         : @"Seated";
+    case 1:  return japanese ? @"弱い(高抵抗RC)"  : @"Weak (High-R)";
+    case 2:  return japanese ? @"怪しい(チャタ)"   : @"Marginal (Jitter)";
+    default: return japanese ? @"繋がってない(OPEN)" : @"Open (No Contact)";
+    }
+}
+
+NSString *localizedXtalkLabel(uint8_t rawState, BOOL japanese) {
+    switch (rawState & 0x30u) {
+    case 0x30u: return japanese ? @" + 左右隣XTALK"   : @" + L/R XTALK";
+    case 0x10u: return japanese ? @" + 左隣ピンXTALK" : @" + Left XTALK";
+    case 0x20u: return japanese ? @" + 右隣ピンXTALK" : @" + Right XTALK";
+    default:    return @"";
+    }
+}
+
+void drawPinMatrixAndInspector(CGContextRef ctx, int selectedPin, BOOL japanese, const CartPinReading *pins) {
+    const HudTextPalette &palette = textPalette();
+    const int inspectedPin = pickDefaultInspectedPin(selectedPin, pins);
 
     drawPinRow(ctx, 0, kFrontRowY, inspectedPin, pins);
     drawPinRow(ctx, 30, kBackRowY, inspectedPin, pins);
@@ -509,24 +520,8 @@ void drawPinMatrixAndInspector(CGContextRef ctx, int selectedPin, BOOL japanese,
     NSString *pinShortName = [NSString stringWithUTF8String:(inspectedPin < 30) ? kFrontPinNames[inspectedPin]
                                                                                 : kBackPinNames[inspectedPin - 30]];
     NSString *roleDesc = [NSString stringWithUTF8String:describePinRole(inspectedPin, japanese)];
-
-    const uint8_t contactCode = reading.contactState & 0x0Fu;
-    NSString *contactLabel = japanese
-        ? ((contactCode == 0) ? @"接続OK"
-            : ((contactCode == 1) ? @"弱い(高抵抗RC)"
-            : ((contactCode == 2) ? @"怪しい(チャタ)" : @"繋がってない(OPEN)")))
-        : ((contactCode == 0) ? @"Seated"
-            : ((contactCode == 1) ? @"Weak (High-R)"
-            : ((contactCode == 2) ? @"Marginal (Jitter)" : @"Open (No Contact)")));
-
-    NSString *xtalkLabel = @"";
-    if ((reading.contactState & 0x30u) == 0x30u) {
-        xtalkLabel = japanese ? @" + 左右隣XTALK" : @" + L/R XTALK";
-    } else if (reading.contactState & 0x10u) {
-        xtalkLabel = japanese ? @" + 左隣ピンXTALK" : @" + Left XTALK";
-    } else if (reading.contactState & 0x20u) {
-        xtalkLabel = japanese ? @" + 右隣ピンXTALK" : @" + Right XTALK";
-    }
+    NSString *contactLabel = localizedContactLabel(reading.contactState & 0x0Fu, japanese);
+    NSString *xtalkLabel = localizedXtalkLabel(reading.contactState, japanese);
 
     const double areaMm2 = (static_cast<double>(reading.overlapUm) / 1000.0) * 1.10;
     const int areaPct = static_cast<int>(std::round((areaMm2 / 1.87) * 100.0));

@@ -156,7 +156,28 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
 
 ---
 
-## リポジトリ構成
+## アーキテクチャとリポジトリ構成
+
+### モジュールと信号フロー
+
+```text
+  FCEUmm コア (third_party/fceumm/src/)
+   ├─ x6502.c / ppu.c / pputile.h  <── 60ピンバスフック ──>  okusan_cart.c / okusan_cart.h
+   │                                                          (3軸幾何・Vcc降下・XTALK・解析計測)
+   ▼ (256x240 RGB565 映像 / 48 kHz APU PCM / 60ピン状態)
+  C++17 コア制御層 (src/core/, Cocoa 非依存)
+   ├─ FamicomCore              (libretro ローダ・実行/リセット・ステート・60ピンAPI)
+   └─ CartridgeFaultInjector   (コールドブート 60ピン接触不良生成＆起動検証)
+   ▼
+  macOS UI・描画・音響層 (src/{app,audio,video,hud,input}/)
+   ├─ AppDelegate + AppMenuController + AppPreferences + LicensesWindow + AppLocalization
+   ├─ CrtScreenView + FreezeFrameGenerator + GLSL シェーダ (2-pass ビーム負荷＆CRT/RF/P4)
+   ├─ CartConnectorHud         (1:1 mm ソケット断面図＆ライブピン監視)
+   ├─ MacAudioEngine + TvSpeakerDsp.hpp (CoreAudio ＋ 小口径紙コーンEQ／インターキャリアバズ)
+   └─ InputBindings + ControllerSettingsWindow (キーボード ＋ GameController)
+```
+
+### ディレクトリ構成
 
 ```text
 .
@@ -171,21 +192,21 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
 │   ├── AppIcon.icns                # macOS アプリアイコン
 │   └── Info.plist                  # バンドル情報（v0.5）
 ├── src/
-│   ├── app/                        # main.mm, AppDelegate (メニュー/履歴/同期), AppLocalization
+│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, LicensesWindow, AppLocalization
 │   ├── core/                       # FamicomCore & CartridgeFaultInjector（標準 C++17 の libretro ローダ＆60ピンAPI）
-│   ├── audio/                      # TvSpeakerDsp.hpp（標準 C++17）と CoreAudio 出力
-│   ├── video/                      # CrtScreenView（OpenGL 2-pass CRT 描画＆HUD合成）
+│   ├── audio/                      # TvSpeakerDsp.hpp（標準 C++17）と MacAudioEngine（CoreAudio 出力）
+│   ├── video/                      # FreezeFrameGenerator（標準 C++17）と CrtScreenView（OpenGL 2-pass CRT 描画）
 │   ├── hud/                        # CartConnectorHud（CoreGraphics 1:1 mm コネクタ＆解析UI）
 │   └── input/                      # InputBindings と ControllerSettingsWindow
 ├── third_party/
-│   └── fceumm/                     # 60ピン物理・CPU/PPU バスフックを組み込んだ FCEUmm コア
+│   └── fceumm/                     # 60ピン物理・CPU/PPU バスフックを組み込んだ FCEUmm コア（okusan_cart.c/.h 等）
 ├── LICENSE                         # GNU General Public License v2.0
 ├── Makefile
 ├── README.md
 └── README.ja.md
 ```
 
-**今後のマルチプラットフォーム拡張について**：`src/core/`、`src/audio/TvSpeakerDsp.hpp`、`resources/shaders/`、`third_party/fceumm/` は Cocoa 非依存で分離されているため、今後 Windows / Linux 版フロントエンド（SDL2 + CMake 等）を追加する際もそのまま共有できます。
+**今後のマルチプラットフォーム拡張について**：`src/core/`、`src/video/FreezeFrameGenerator.{hpp,cpp}`、`src/audio/TvSpeakerDsp.hpp`、`resources/shaders/`、`third_party/fceumm/` は Cocoa 非依存で分離されているため、今後 Windows / Linux 版フロントエンド（SDL2 + CMake 等）を追加する際もそのまま共有できます。
 
 ---
 
@@ -193,7 +214,7 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
 
 本リポジトリは改変版の **[libretro-fceumm](https://github.com/libretro/libretro-fceumm)** を統合しており、全体として **GNU General Public License v2.0**（[`LICENSE`](LICENSE)）の下で公開します。
 
-- **FCEUmm (libretro)** — FCE Ultra / FCEU-mm ベースの NES/ファミコンエミュレーションコア（Xodnizel, CaH4e3, BERO, libretro contributors / GNU GPL v2.0。`src/okusan_cart.h`, `src/ppu.c`, `src/ppu.h`, `src/pputile.h`, `src/x6502.c` に 60ピン物理・バスフックを追加）
+- **FCEUmm (libretro)** — FCE Ultra / FCEU-mm ベースの NES/ファミコンエミュレーションコア（Xodnizel, CaH4e3, BERO, libretro contributors / GNU GPL v2.0。`src/okusan_cart.h`, `src/okusan_cart.c`, `Makefile.common`, `src/ppu.c`, `src/ppu.h`, `src/pputile.h`, `src/x6502.c` に 60ピン物理・バスフックを追加）
 - **libretro API & libretro-common** — `third_party/fceumm` に内包（MIT License）
 - **nes_ntsc**（Shay Green / Blargg）・**EMU2413**（Mitsutaka Okazaki）— `third_party/fceumm` に内包
 

@@ -53,6 +53,7 @@ SOURCES_C += \
 	$(CORE_DIR)/md5.c \
 	$(CORE_DIR)/nsf.c \
 	$(CORE_DIR)/palette.c \
+	$(CORE_DIR)/okusan_cart.c \
 	$(CORE_DIR)/ppu.c \
 	$(CORE_DIR)/sound.c \
 	$(CORE_DIR)/state.c \

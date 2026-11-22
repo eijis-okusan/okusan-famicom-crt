@@ -1,5 +1,8 @@
-#import "AppDelegate.hpp"
-#import "AppLocalization.hpp"
+#import "app/AppDelegate.hpp"
+#import "app/AppLocalization.hpp"
+#import "app/AppMenuController.hpp"
+#import "app/AppPreferences.hpp"
+#import "app/LicensesWindow.hpp"
 
 #import <Carbon/Carbon.h>
 #import <GameController/GameController.h>
@@ -30,27 +33,16 @@ enum RetroJoypadBit : unsigned {
     JOYPAD_A      = 8,
 };
 
-constexpr NSUInteger kMaxRecentRoms = 10;
-
 uint64_t monotonicNowNs() {
     static mach_timebase_info_data_t timebase{};
     if (timebase.denom == 0) mach_timebase_info(&timebase);
     return (mach_absolute_time() * timebase.numer) / timebase.denom;
 }
 
-std::string applicationSupportDir() {
-    NSArray<NSString *> *dirs = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
-    NSString *base = dirs.firstObject ?: NSTemporaryDirectory();
-    NSString *appDir = [base stringByAppendingPathComponent:@"Okusan-Famicom-CRT-Player"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:appDir withIntermediateDirectories:YES attributes:nil error:nil];
-    return std::string([appDir UTF8String]);
-}
-
 bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pressedKeys) {
-    if (group.primary < pressedKeys.size() && pressedKeys[group.primary]) return true;
-    if (group.alt1 < pressedKeys.size() && pressedKeys[group.alt1]) return true;
-    if (group.alt2 < pressedKeys.size() && pressedKeys[group.alt2]) return true;
-    return false;
+    return (group.primary < pressedKeys.size() && pressedKeys[group.primary]) ||
+           (group.alt1    < pressedKeys.size() && pressedKeys[group.alt1])    ||
+           (group.alt2    < pressedKeys.size() && pressedKeys[group.alt2]);
 }
 
 // Match cartridge contact keys by character when possible so both US ANSI and Japanese JIS
@@ -63,10 +55,13 @@ bool isContactFaultBootShortcut(NSEvent *event) {
 
 bool isCartridgeContactShortcut(NSEvent *event) {
     NSString *charsIgn = event.charactersIgnoringModifiers ?: @"";
-    return event.keyCode == kVK_ANSI_Comma || event.keyCode == kVK_ANSI_Period ||
+    return event.keyCode == kVK_ANSI_Comma ||
+           event.keyCode == kVK_ANSI_Period ||
            event.keyCode == kVK_ANSI_Slash ||
-           [charsIgn isEqualToString:@"["] || [charsIgn isEqualToString:@"]"] ||
-           [charsIgn isEqualToString:@"\\"] || [charsIgn isEqualToString:@"¥"];
+           [charsIgn isEqualToString:@"["] ||
+           [charsIgn isEqualToString:@"]"] ||
+           [charsIgn isEqualToString:@"\\"] ||
+           [charsIgn isEqualToString:@"¥"];
 }
 
 } // namespace
@@ -96,325 +91,46 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     NSString *_loadedRomPath;
     NSString *_pendingRomPath;
     NSMutableArray<NSString *> *_recentRoms;
-    NSMenu *_historyMenu;
 
-    NSMenuItem *_menuRgb;
-    NSMenuItem *_menuRf;
-    NSMenuItem *_menuBwRf;
-    NSMenuItem *_menuInterlaced;
-    NSMenuItem *_menuHvBloom;
-    NSMenuItem *_menuCurvature;
-    NSMenuItem *_menuSlotMask;
-    NSMenuItem *_menuMute;
-    NSMenuItem *_menuPause;
-    NSMenuItem *_menuFreeze;
-    NSMenuItem *_menuPower;
-    NSMenuItem *_menuSwapPadAB;
-    NSMenuItem *_menuLeftStick;
-    NSMenuItem *_menuLangSystem;
-    NSMenuItem *_menuLangJapanese;
-    NSMenuItem *_menuLangEnglish;
-
+    AppMenuController *_menuController;
     InputBindings _bindings;
     ControllerSettingsWindow *_settingsWindow;
-    NSWindow *_licensesWindow;
-    NSTextView *_licensesTextView;
+    LicensesWindowController *_licensesController;
 }
 
-#pragma mark - Preferences & Recent ROMs
+#pragma mark - Preferences & Menu Sync
 
 - (void)loadUserPreferences {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     CrtDisplayConfig config = _screenView.displayConfig;
-
-    if ([defaults objectForKey:@"useRf"])        config.rfMode = [defaults boolForKey:@"useRf"];
-    if ([defaults objectForKey:@"monochrome"])   config.monochrome = [defaults boolForKey:@"monochrome"];
-    if ([defaults objectForKey:@"interlaced"])   config.interlaced = [defaults boolForKey:@"interlaced"];
-    if ([defaults objectForKey:@"hvBloom"])      config.hvBloom = [defaults floatForKey:@"hvBloom"];
-    if ([defaults objectForKey:@"curvature"])    config.curvature = [defaults floatForKey:@"curvature"];
-    if ([defaults objectForKey:@"maskStrength"]) config.slotMask = [defaults floatForKey:@"maskStrength"];
-    if ([defaults objectForKey:@"rfSnow"])       config.rfSnow = [defaults floatForKey:@"rfSnow"];
-    if ([defaults objectForKey:@"rfSignal"])     config.rfSignal = [defaults floatForKey:@"rfSignal"];
-
+    bool muted = false;
+    app_prefs::loadDisplayPreferences(config, muted);
     _screenView.displayConfig = config;
     _audioEngine.setRfTvMode(config.rfMode, config.rfSnow, config.rfSignal);
-    if ([defaults objectForKey:@"muted"]) {
-        _audioEngine.setMuted([defaults boolForKey:@"muted"]);
-    }
+    _audioEngine.setMuted(muted);
+
     _bindings.loadFromDefaults();
-
-    _recentRoms = [NSMutableArray array];
-    for (id entry in [defaults arrayForKey:@"recentRoms"]) {
-        if (![entry isKindOfClass:[NSString class]]) continue;
-        NSString *normalized = [(NSString *)entry stringByStandardizingPath];
-        if (normalized.length == 0 || [_recentRoms containsObject:normalized]) continue;
-        [_recentRoms addObject:normalized];
-        if (_recentRoms.count >= kMaxRecentRoms) break;
-    }
+    _recentRoms = app_prefs::loadRecentRomPaths();
 }
 
-- (void)saveDisplayPreferences {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    const CrtDisplayConfig config = _screenView.displayConfig;
-    [defaults setBool:config.rfMode forKey:@"useRf"];
-    [defaults setBool:config.monochrome forKey:@"monochrome"];
-    [defaults setBool:config.interlaced forKey:@"interlaced"];
-    [defaults setFloat:config.hvBloom forKey:@"hvBloom"];
-    [defaults setFloat:config.curvature forKey:@"curvature"];
-    [defaults setFloat:config.slotMask forKey:@"maskStrength"];
-    [defaults setFloat:config.rfSnow forKey:@"rfSnow"];
-    [defaults setFloat:config.rfSignal forKey:@"rfSignal"];
-    [defaults setBool:_audioEngine.isMuted() forKey:@"muted"];
-}
-
-- (void)saveRecentRoms {
-    [[NSUserDefaults standardUserDefaults] setObject:[_recentRoms copy] forKey:@"recentRoms"];
-}
-
-- (void)rebuildHistoryMenu {
-    if (!_historyMenu) return;
-    [_historyMenu removeAllItems];
-
-    if (_recentRoms.count == 0) {
-        NSMenuItem *emptyItem = [_historyMenu addItemWithTitle:app_l10n::tr(@"(履歴なし)", @"No Recent ROMs")
-                                                        action:nil
-                                                 keyEquivalent:@""];
-        emptyItem.enabled = NO;
-        [_historyMenu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *clearItem = [_historyMenu addItemWithTitle:app_l10n::tr(@"履歴をクリア", @"Clear History")
-                                                        action:@selector(clearRecentRoms:)
-                                                 keyEquivalent:@""];
-        clearItem.target = self;
-        clearItem.enabled = NO;
-        return;
+- (void)rebuildMenuBar {
+    if (!_menuController) {
+        _menuController = [[AppMenuController alloc] init];
     }
-
-    NSString *activeRom = _loadedRomPath ? [_loadedRomPath stringByStandardizingPath] : nil;
-    for (NSUInteger i = 0; i < _recentRoms.count; ++i) {
-        NSString *romPath = _recentRoms[i];
-        NSString *displayName = [[romPath lastPathComponent] stringByDeletingPathExtension];
-        if (displayName.length == 0) {
-            displayName = romPath.lastPathComponent.length ? romPath.lastPathComponent : romPath;
-        }
-        NSString *itemTitle = [NSString stringWithFormat:@"%lu. %@", (unsigned long)(i + 1), displayName];
-        NSMenuItem *item = [_historyMenu addItemWithTitle:itemTitle
-                                                   action:@selector(playRecentRom:)
-                                            keyEquivalent:@""];
-        item.target = self;
-        item.representedObject = romPath;
-        item.toolTip = romPath;
-        item.enabled = YES;
-        item.state = (activeRom && [activeRom isEqualToString:romPath])
-            ? NSControlStateValueOn
-            : NSControlStateValueOff;
-    }
-
-    [_historyMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *clearItem = [_historyMenu addItemWithTitle:app_l10n::tr(@"履歴をクリア", @"Clear History")
-                                                    action:@selector(clearRecentRoms:)
-                                             keyEquivalent:@""];
-    clearItem.target = self;
-    clearItem.enabled = YES;
-}
-
-- (void)recordRecentRom:(NSString *)romPath {
-    if (!romPath || romPath.length == 0) return;
-    if (!_recentRoms) _recentRoms = [NSMutableArray array];
-
-    NSString *normalized = [romPath stringByStandardizingPath];
-    [_recentRoms removeObject:normalized];
-    [_recentRoms insertObject:normalized atIndex:0];
-    while (_recentRoms.count > kMaxRecentRoms) {
-        [_recentRoms removeLastObject];
-    }
-    [self saveRecentRoms];
-    [self rebuildHistoryMenu];
+    [_menuController installMenuBarWithTarget:self];
+    [_menuController rebuildHistoryMenuWithPaths:_recentRoms activePath:_loadedRomPath target:self];
+    [self refreshMenuStates];
 }
 
 - (void)refreshMenuStates {
-    const CrtDisplayConfig config = _screenView.displayConfig;
-    const BOOL isBwMode = config.rfMode && config.monochrome;
-
-    _menuRgb.state = !config.rfMode ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuRf.state = (config.rfMode && !config.monochrome) ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuBwRf.state = isBwMode ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuInterlaced.state = config.interlaced ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuHvBloom.state = (config.hvBloom > 0.1f) ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuCurvature.state = (config.curvature > 0.1f) ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuSlotMask.state = (config.slotMask > 0.1f && !isBwMode) ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuSlotMask.enabled = !isBwMode;
-
-    _menuMute.state = _audioEngine.isMuted() ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuPause.state = _paused ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuFreeze.state = _frozen ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuPower.state = (_famicom.isLoaded() && _screenView.consolePowered)
-        ? NSControlStateValueOn
-        : NSControlStateValueOff;
-    _menuSwapPadAB.state = _bindings.swapGamepadAB ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuLeftStick.state = _bindings.useLeftStick ? NSControlStateValueOn : NSControlStateValueOff;
-
-    const AppLanguageMode langMode = app_l10n::loadLanguageMode();
-    _menuLangSystem.state = (langMode == AppLanguageMode::System) ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuLangJapanese.state = (langMode == AppLanguageMode::Japanese) ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuLangEnglish.state = (langMode == AppLanguageMode::English) ? NSControlStateValueOn : NSControlStateValueOff;
+    [_menuController refreshStatesWithDisplayConfig:_screenView.displayConfig
+                                              muted:(_audioEngine.isMuted() ? YES : NO)
+                                             paused:_paused
+                                             frozen:_frozen
+                                     consolePowered:(_famicom.isLoaded() && _screenView.consolePowered)
+                                      inputBindings:_bindings];
 }
 
-- (void)assignUnmodifiedFunctionKey:(unichar)fnKey toItem:(NSMenuItem *)item {
-    item.keyEquivalent = [NSString stringWithCharacters:&fnKey length:1];
-    item.keyEquivalentModifierMask = 0;
-}
-
-#pragma mark - Menu Bar
-
-- (void)buildMenuBar {
-    NSMenu *mainMenu = [[NSMenu alloc] init];
-
-    NSMenuItem *appItem = [[NSMenuItem alloc] init];
-    NSMenu *appMenu = [[NSMenu alloc] init];
-    [appMenu addItemWithTitle:app_l10n::tr(@"おくさんファミコンについて", @"About Okusan Famicom CRT")
-                       action:@selector(showAboutPanel:)
-                keyEquivalent:@""];
-    [appMenu addItemWithTitle:app_l10n::tr(@"オープンソースライセンス...", @"Open Source Licenses...")
-                       action:@selector(showOpenSourceLicenses:)
-                keyEquivalent:@""];
-    [appMenu addItem:[NSMenuItem separatorItem]];
-
-    NSMenuItem *langRootItem = [[NSMenuItem alloc] initWithTitle:app_l10n::tr(@"言語 / Language", @"Language")
-                                                          action:nil
-                                                   keyEquivalent:@""];
-    NSMenu *langMenu = [[NSMenu alloc] initWithTitle:langRootItem.title];
-    _menuLangSystem = [langMenu addItemWithTitle:app_l10n::tr(@"システムに合わせる", @"Follow System")
-                                          action:@selector(selectLanguageSystem:)
-                                   keyEquivalent:@""];
-    _menuLangJapanese = [langMenu addItemWithTitle:@"日本語"
-                                            action:@selector(selectLanguageJapanese:)
-                                     keyEquivalent:@""];
-    _menuLangEnglish = [langMenu addItemWithTitle:@"English"
-                                           action:@selector(selectLanguageEnglish:)
-                                    keyEquivalent:@""];
-    langRootItem.submenu = langMenu;
-    [appMenu addItem:langRootItem];
-
-    [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:app_l10n::tr(@"おくさんファミコンを終了", @"Quit Okusan Famicom CRT")
-                       action:@selector(terminate:)
-                keyEquivalent:@"q"];
-    appItem.submenu = appMenu;
-    [mainMenu addItem:appItem];
-
-    NSMenuItem *emuItem = [[NSMenuItem alloc] init];
-    NSMenu *emuMenu = [[NSMenu alloc] initWithTitle:app_l10n::tr(@"エミュレータ", @"Emulator")];
-    [emuMenu addItemWithTitle:app_l10n::tr(@"NES ROM を開く...", @"Open NES ROM...")
-                       action:@selector(openRomDialog:)
-                keyEquivalent:@"o"];
-    [emuMenu addItem:[NSMenuItem separatorItem]];
-    _menuPause = [emuMenu addItemWithTitle:app_l10n::tr(@"一時停止", @"Pause")
-                                    action:@selector(togglePause:)
-                             keyEquivalent:@"p"];
-    _menuFreeze = [emuMenu addItemWithTitle:app_l10n::tr(@"接触フリーズ (F)", @"Freeze Famicom (F)")
-                                     action:@selector(toggleFreeze:)
-                              keyEquivalent:@""];
-    [emuMenu addItemWithTitle:app_l10n::tr(@"リセット (R長押し)", @"Reset (Hold R)")
-                       action:@selector(resetConsole:)
-                keyEquivalent:@"r"];
-    [emuMenu addItem:[NSMenuItem separatorItem]];
-
-    NSMenuItem *quickSaveItem = [emuMenu addItemWithTitle:app_l10n::tr(@"クイックセーブ", @"Quick Save")
-                                                   action:@selector(quickSave:)
-                                            keyEquivalent:@""];
-    [self assignUnmodifiedFunctionKey:NSF5FunctionKey toItem:quickSaveItem];
-
-    NSMenuItem *quickLoadItem = [emuMenu addItemWithTitle:app_l10n::tr(@"クイックロード", @"Quick Load")
-                                                   action:@selector(quickLoad:)
-                                            keyEquivalent:@""];
-    [self assignUnmodifiedFunctionKey:NSF8FunctionKey toItem:quickLoadItem];
-
-    [emuMenu addItem:[NSMenuItem separatorItem]];
-    _menuMute = [emuMenu addItemWithTitle:app_l10n::tr(@"ミュート", @"Mute Audio")
-                                   action:@selector(toggleMute:)
-                            keyEquivalent:@"m"];
-    emuItem.submenu = emuMenu;
-    [mainMenu addItem:emuItem];
-
-    NSMenuItem *historyItem = [[NSMenuItem alloc] init];
-    _historyMenu = [[NSMenu alloc] initWithTitle:app_l10n::tr(@"履歴", @"History")];
-    _historyMenu.autoenablesItems = NO;
-    historyItem.submenu = _historyMenu;
-    [mainMenu addItem:historyItem];
-    [self rebuildHistoryMenu];
-
-    NSMenuItem *displayItem = [[NSMenuItem alloc] init];
-    NSMenu *displayMenu = [[NSMenu alloc] initWithTitle:app_l10n::tr(@"CRT ディスプレイ", @"CRT Display")];
-    displayMenu.autoenablesItems = NO;
-    _menuPower = [displayMenu addItemWithTitle:app_l10n::tr(@"ファミコン電源 (O)", @"Famicom Power (O)")
-                                        action:@selector(toggleConsolePower:)
-                                 keyEquivalent:@""];
-    [displayMenu addItemWithTitle:app_l10n::tr(@"接触不良起動 / スイッチOFF (@)", @"Contact Fault Boot / Power Off (@)")
-                           action:@selector(toggleBadBootSwitch:)
-                    keyEquivalent:@""];
-    [displayMenu addItem:[NSMenuItem separatorItem]];
-    _menuRgb = [displayMenu addItemWithTitle:app_l10n::tr(@"RGB モニター (okusan-crt-rgb)", @"RGB Monitor (okusan-crt-rgb)")
-                                      action:@selector(selectRgbMode:)
-                               keyEquivalent:@"1"];
-    _menuRf = [displayMenu addItemWithTitle:app_l10n::tr(@"カラー RF テレビ (okusan-crt-rf)", @"Color RF Television (okusan-crt-rf)")
-                                     action:@selector(selectColorRfMode:)
-                              keyEquivalent:@"2"];
-    _menuBwRf = [displayMenu addItemWithTitle:app_l10n::tr(@"白黒 RF テレビ (P4蛍光体)", @"B&W RF Television (P4 Phosphor)")
-                                       action:@selector(selectBwRfMode:)
-                                keyEquivalent:@"3"];
-    [displayMenu addItem:[NSMenuItem separatorItem]];
-    _menuInterlaced = [displayMenu addItemWithTitle:app_l10n::tr(@"525本 480i インターレース (OFF = 240p)",
-                                                                 @"525-Line 480i Interlace (Off = 240p)")
-                                             action:@selector(toggleInterlaced:)
-                                      keyEquivalent:@"i"];
-    _menuHvBloom = [displayMenu addItemWithTitle:app_l10n::tr(@"フライバック HV ブルーム", @"Flyback HV Bloom")
-                                          action:@selector(toggleHvBloom:)
-                                   keyEquivalent:@"b"];
-    _menuCurvature = [displayMenu addItemWithTitle:app_l10n::tr(@"ブラウン管曲率 (OFF = 平面)", @"Tube Curvature (Off = Flat)")
-                                            action:@selector(toggleCurvature:)
-                                     keyEquivalent:@"c"];
-    _menuSlotMask = [displayMenu addItemWithTitle:app_l10n::tr(@"蛍光体スロットマスク", @"Phosphor Slot Mask")
-                                           action:@selector(toggleSlotMask:)
-                                    keyEquivalent:@"k"];
-    [displayMenu addItem:[NSMenuItem separatorItem]];
-    [displayMenu addItemWithTitle:app_l10n::tr(@"RF ノイズ: 弱 (0.5x)", @"RF Static: Mild (0.5x)")
-                           action:@selector(selectRfMild:)
-                    keyEquivalent:@""];
-    [displayMenu addItemWithTitle:app_l10n::tr(@"RF ノイズ: 標準 (1.0x)", @"RF Static: Standard (1.0x)")
-                           action:@selector(selectRfStandard:)
-                    keyEquivalent:@""];
-    [displayMenu addItemWithTitle:app_l10n::tr(@"RF ノイズ: 強 (1.6x)", @"RF Static: Heavy (1.6x)")
-                           action:@selector(selectRfHeavy:)
-                    keyEquivalent:@""];
-    [displayMenu addItem:[NSMenuItem separatorItem]];
-    [displayMenu addItemWithTitle:app_l10n::tr(@"フルスクリーン切替", @"Toggle Full Screen")
-                           action:@selector(toggleFullScreen:)
-                    keyEquivalent:@"f"];
-    displayItem.submenu = displayMenu;
-    [mainMenu addItem:displayItem];
-
-    NSMenuItem *ctrlItem = [[NSMenuItem alloc] init];
-    NSMenu *ctrlMenu = [[NSMenu alloc] initWithTitle:app_l10n::tr(@"コントローラ", @"Controller")];
-    [ctrlMenu addItemWithTitle:app_l10n::tr(@"コントローラ設定...", @"Controller Settings...")
-                        action:@selector(openControllerSettings:)
-                 keyEquivalent:@","];
-    [ctrlMenu addItem:[NSMenuItem separatorItem]];
-    _menuSwapPadAB = [ctrlMenu addItemWithTitle:app_l10n::tr(@"ゲームパッド A / B 入替", @"Swap Gamepad A / B")
-                                         action:@selector(toggleSwapGamepadAB:)
-                                  keyEquivalent:@""];
-    _menuLeftStick = [ctrlMenu addItemWithTitle:app_l10n::tr(@"左スティックを十字キーに使用", @"Use Left Stick as D-Pad")
-                                         action:@selector(toggleLeftStickDpad:)
-                                  keyEquivalent:@""];
-    [ctrlMenu addItem:[NSMenuItem separatorItem]];
-    [ctrlMenu addItemWithTitle:app_l10n::tr(@"入力設定を初期化", @"Reset Default Bindings")
-                        action:@selector(resetBindingsToDefaults:)
-                 keyEquivalent:@""];
-    ctrlItem.submenu = ctrlMenu;
-    [mainMenu addItem:ctrlItem];
-
-    [NSApp setMainMenu:mainMenu];
-    [self refreshMenuStates];
-}
+#pragma mark - ROM Loading & Actions
 
 - (BOOL)loadAndPowerOnRom:(NSString *)romPath {
     if (!romPath || ![[NSFileManager defaultManager] fileExistsAtPath:romPath]) {
@@ -423,7 +139,7 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 
     NSString *corePath = [[[NSBundle mainBundle] privateFrameworksPath]
                           stringByAppendingPathComponent:@"fceumm_libretro.dylib"];
-    const std::string supportDir = applicationSupportDir();
+    const std::string supportDir = app_prefs::applicationSupportDirectory();
 
     if (!corePath || !_famicom.load([corePath UTF8String], [romPath UTF8String], supportDir, supportDir)) {
         NSAlert *alert = [[NSAlert alloc] init];
@@ -438,7 +154,8 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     }
 
     _loadedRomPath = [romPath copy];
-    [self recordRecentRom:romPath];
+    app_prefs::recordRecentRomPath(_recentRoms, romPath);
+    [_menuController rebuildHistoryMenuWithPaths:_recentRoms activePath:_loadedRomPath target:self];
 
     _paused = NO;
     _frozen = NO;
@@ -472,8 +189,8 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:romPath]) {
         [_recentRoms removeObject:romPath];
-        [self saveRecentRoms];
-        [self rebuildHistoryMenu];
+        app_prefs::saveRecentRomPaths(_recentRoms);
+        [_menuController rebuildHistoryMenuWithPaths:_recentRoms activePath:_loadedRomPath target:self];
 
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = app_l10n::tr(@"NES ROM が見つかりませんでした", @"NES ROM File Not Found");
@@ -487,8 +204,8 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 
 - (void)clearRecentRoms:(id)sender {
     [_recentRoms removeAllObjects];
-    [self saveRecentRoms];
-    [self rebuildHistoryMenu];
+    app_prefs::saveRecentRomPaths(_recentRoms);
+    [_menuController rebuildHistoryMenuWithPaths:_recentRoms activePath:_loadedRomPath target:self];
 }
 
 - (void)openRomDialog:(id)sender {
@@ -510,50 +227,21 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     mutator(config);
     _screenView.displayConfig = config;
     _audioEngine.setRfTvMode(config.rfMode, config.rfSnow, config.rfSignal);
-    [self saveDisplayPreferences];
+    app_prefs::saveDisplayPreferences(config, _audioEngine.isMuted());
     [self refreshMenuStates];
     [_screenView requestRedraw];
 }
 
-- (void)selectRgbMode:(id)sender {
-    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = false; c.monochrome = false; }];
-}
-
-- (void)selectColorRfMode:(id)sender {
-    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.monochrome = false; }];
-}
-
-- (void)selectBwRfMode:(id)sender {
-    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.monochrome = true; }];
-}
-
-- (void)toggleInterlaced:(id)sender {
-    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.interlaced = !c.interlaced; }];
-}
-
-- (void)toggleHvBloom:(id)sender {
-    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.hvBloom = (c.hvBloom > 0.1f) ? 0.0f : 1.0f; }];
-}
-
-- (void)toggleCurvature:(id)sender {
-    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.curvature = (c.curvature > 0.1f) ? 0.0f : 1.0f; }];
-}
-
-- (void)toggleSlotMask:(id)sender {
-    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.slotMask = (c.slotMask > 0.1f) ? 0.0f : 1.0f; }];
-}
-
-- (void)selectRfMild:(id)sender {
-    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.rfSnow = 0.5f; c.rfSignal = 0.65f; }];
-}
-
-- (void)selectRfStandard:(id)sender {
-    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.rfSnow = 1.0f; c.rfSignal = 1.0f; }];
-}
-
-- (void)selectRfHeavy:(id)sender {
-    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.rfSnow = 1.6f; c.rfSignal = 1.35f; }];
-}
+- (void)selectRgbMode:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = false; c.monochrome = false; }]; }
+- (void)selectColorRfMode:(id)sender { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = false; }]; }
+- (void)selectBwRfMode:(id)sender    { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = true;  }]; }
+- (void)toggleInterlaced:(id)sender  { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.interlaced = !c.interlaced; }]; }
+- (void)toggleHvBloom:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.hvBloom = (c.hvBloom > 0.1f) ? 0.0f : 1.0f; }]; }
+- (void)toggleCurvature:(id)sender   { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.curvature = (c.curvature > 0.1f) ? 0.0f : 1.0f; }]; }
+- (void)toggleSlotMask:(id)sender    { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.slotMask = (c.slotMask > 0.1f) ? 0.0f : 1.0f; }]; }
+- (void)selectRfMild:(id)sender      { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.rfSnow = 0.5f; c.rfSignal = 0.65f; }]; }
+- (void)selectRfStandard:(id)sender  { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.rfSnow = 1.0f; c.rfSignal = 1.0f;  }]; }
+- (void)selectRfHeavy:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.rfSnow = 1.6f; c.rfSignal = 1.35f; }]; }
 
 - (void)togglePause:(id)sender {
     if (!_famicom.isLoaded()) return;
@@ -583,29 +271,21 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     [self triggerConsoleReset];
 }
 
-- (std::string)quickStatePath {
-    NSString *baseName = _loadedRomPath ? [[_loadedRomPath lastPathComponent] stringByDeletingPathExtension] : @"default";
-    NSCharacterSet *unsafe = [[NSCharacterSet alphanumericCharacterSet] invertedSet];
-    NSString *sanitized = [[baseName componentsSeparatedByCharactersInSet:unsafe] componentsJoinedByString:@"_"];
-    if (sanitized.length == 0) sanitized = @"game";
-    return applicationSupportDir() + "/quickstate_" + std::string([sanitized UTF8String]) + ".ss";
-}
-
 - (void)quickSave:(id)sender {
     if (_famicom.isLoaded() && _screenView.consolePowered && !_frozen) {
-        _famicom.saveState([self quickStatePath]);
+        _famicom.saveState(app_prefs::quickStatePathForRom(_loadedRomPath));
     }
 }
 
 - (void)quickLoad:(id)sender {
     if (_famicom.isLoaded() && _screenView.consolePowered && !_frozen) {
-        _famicom.loadState([self quickStatePath]);
+        _famicom.loadState(app_prefs::quickStatePathForRom(_loadedRomPath));
     }
 }
 
 - (void)toggleMute:(id)sender {
     _audioEngine.setMuted(!_audioEngine.isMuted());
-    [self saveDisplayPreferences];
+    app_prefs::saveDisplayPreferences(_screenView.displayConfig, _audioEngine.isMuted());
     [self refreshMenuStates];
 }
 
@@ -633,7 +313,7 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     [self refreshMenuStates];
 }
 
-#pragma mark - Power, Freeze & Contact Faults
+#pragma mark - Power & Contact Faults
 
 - (void)prepareConsoleForPowerTransition {
     [self exitFreezeIfActive];
@@ -671,7 +351,7 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     }
 
     _paused = NO;
-    // Apply the randomized contact fault before cold reset so glitching starts from frame 0.
+    // Apply randomized pin/pose faults BEFORE reset so corruption starts from frame 0.
     const CartridgeFaultPlan faultPlan = selectViableRandomFaultBoot(_famicom);
     _cartTilt = faultPlan.tilt;
     _cartLift = faultPlan.lift;
@@ -729,17 +409,12 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     NSString *charsIgn = event.charactersIgnoringModifiers ?: @"";
     const BOOL isPinKey = [charsIgn isEqualToString:@"\\"] || [charsIgn isEqualToString:@"¥"] ||
                           (event.keyCode == kVK_ANSI_Backslash && ![charsIgn isEqualToString:@"]"]);
-    const BOOL isSlashKey = (event.keyCode == kVK_ANSI_Slash);
-    const BOOL isPitchDown = [charsIgn isEqualToString:@"["];
-    const BOOL isPitchUp = [charsIgn isEqualToString:@"]"];
-    const int prevTilt = _cartTilt;
-    const int prevLift = _cartLift;
-    const int prevPitch = _cartPitch;
 
     if (isPinKey) {
         if (!event.isARepeat) [_screenView toggleConnectorHudPinned];
         return;
-    } else if (isSlashKey) {
+    }
+    if (event.keyCode == kVK_ANSI_Slash) {
         if (event.isARepeat) return;
         _cartTilt = 0;
         _cartLift = 0;
@@ -750,9 +425,15 @@ bool isCartridgeContactShortcut(NSEvent *event) {
         }
         [_screenView showConnectorHud];
         return;
-    } else if (isPitchDown) {
+    }
+
+    const int prevTilt = _cartTilt;
+    const int prevLift = _cartLift;
+    const int prevPitch = _cartPitch;
+
+    if ([charsIgn isEqualToString:@"["]) {
         _cartPitch = std::max(-8, _cartPitch - 1);
-    } else if (isPitchUp) {
+    } else if ([charsIgn isEqualToString:@"]"]) {
         _cartPitch = std::min(8, _cartPitch + 1);
     } else if (event.keyCode == kVK_ANSI_Comma) {
         if (shiftDown) _cartLift = std::min(16, _cartLift + 1);
@@ -780,9 +461,7 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 
     if (cmdMods == 0) {
         if (isContactFaultBootShortcut(event)) {
-            if (!event.isARepeat) {
-                [self toggleBadBootSwitch:nil];
-            }
+            if (!event.isARepeat) [self toggleBadBootSwitch:nil];
             return;
         }
         if (isCartridgeContactShortcut(event)) {
@@ -841,122 +520,22 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 - (void)applyLanguageMode:(AppLanguageMode)mode {
     app_l10n::saveLanguageMode(mode);
     _window.title = app_l10n::tr(@"(´❝᷀ົ👄❝᷀ົ)おくさんファミコン", @"(´❝᷀ົ👄❝᷀ົ) Okusan Famicom CRT");
-    [self buildMenuBar];
+    [self rebuildMenuBar];
     if (_settingsWindow) [_settingsWindow refreshUI];
-    if (_licensesWindow) [self refreshLicensesWindowText];
+    if (_licensesController) [_licensesController refreshLocalization];
     [_screenView invalidateConnectorHud];
 }
 
 - (void)selectLanguageSystem:(id)sender   { [self applyLanguageMode:AppLanguageMode::System]; }
 - (void)selectLanguageJapanese:(id)sender { [self applyLanguageMode:AppLanguageMode::Japanese]; }
 - (void)selectLanguageEnglish:(id)sender  { [self applyLanguageMode:AppLanguageMode::English]; }
-
-- (void)showAboutPanel:(id)sender {
-    NSString *creditsText = app_l10n::tr(
-        @"エミュレーションコア: FCEUmm (libretro) — GNU GPL v2.0\n"
-        @"ブラウン管シェーダ & 60ピン物理接点モデル: おくさんファミコン\n\n"
-        @"サードパーティ OSS の詳細はアプリメニューの「オープンソースライセンス...」をご覧ください。",
-        @"Emulation Core: FCEUmm (libretro) — GNU GPL v2.0\n"
-        @"CRT Shader & 60-Pin Contact Model: Okusan Famicom CRT\n\n"
-        @"See \"Open Source Licenses...\" in the app menu for third-party notices.");
-    NSAttributedString *credits = [[NSAttributedString alloc]
-        initWithString:creditsText
-            attributes:@{
-                NSFontAttributeName: [NSFont systemFontOfSize:11.0],
-                NSForegroundColorAttributeName: [NSColor secondaryLabelColor]
-            }];
-    [NSApp orderFrontStandardAboutPanelWithOptions:@{
-        NSAboutPanelOptionApplicationName: app_l10n::tr(@"おくさんファミコン", @"Okusan Famicom CRT"),
-        NSAboutPanelOptionCredits: credits
-    }];
-}
-
-- (void)refreshLicensesWindowText {
-    if (!_licensesWindow || !_licensesTextView) return;
-    _licensesWindow.title = app_l10n::tr(@"オープンソースライセンス", @"Open Source Licenses");
-
-    NSString *header = app_l10n::tr(
-        @"おくさんファミコン — 利用しているオープンソースソフトウェア\n"
-        @"========================================================\n\n"
-        @"1. FCEUmm (libretro)\n"
-        @"   役割: NES / ファミコンエミュレーションコア（60ピン物理・バスフック改変込み）\n"
-        @"   配布元: https://github.com/libretro/libretro-fceumm\n"
-        @"   ベース: FCE Ultra / FCEU-mm (Xodnizel, CaH4e3, BERO, libretro contributors)\n"
-        @"   ライセンス: GNU General Public License v2.0 (GPL-2.0)\n\n"
-        @"2. libretro API & libretro-common（FCEUmm に内包）\n"
-        @"   役割: コア共通 C ABI およびファイル・エンコーディング補助\n"
-        @"   配布元: https://github.com/libretro/libretro-common\n"
-        @"   ライセンス: MIT License\n\n"
-        @"3. nes_ntsc & EMU2413（FCEUmm に内包）\n"
-        @"   作者: Shay Green (Blargg) / Mitsutaka Okazaki\n"
-        @"   ライセンス: LGPL v2.1+ / BSD-style（各ソースヘッダ参照）\n\n",
-        @"Okusan Famicom CRT — Open Source Software Acknowledgments\n"
-        @"========================================================\n\n"
-        @"1. FCEUmm (libretro)\n"
-        @"   Role: NES / Famicom emulation core (modified with 60-pin connector & bus hooks)\n"
-        @"   Upstream: https://github.com/libretro/libretro-fceumm\n"
-        @"   Based on FCE Ultra / FCEU-mm by Xodnizel, CaH4e3, BERO, and contributors\n"
-        @"   License: GNU General Public License v2.0 (GPL-2.0)\n\n"
-        @"2. libretro API & libretro-common (bundled within FCEUmm)\n"
-        @"   Role: Core C ABI and portable file/encoding helpers\n"
-        @"   Upstream: https://github.com/libretro/libretro-common\n"
-        @"   License: MIT License\n\n"
-        @"3. nes_ntsc & EMU2413 (bundled within FCEUmm)\n"
-        @"   Authors: Shay Green (Blargg) / Mitsutaka Okazaki\n"
-        @"   License: LGPL v2.1+ / BSD-style (see third_party/fceumm source headers)\n\n");
-
-    NSMutableString *body = [NSMutableString stringWithString:header];
-    NSString *gplPath = [[NSBundle mainBundle] pathForResource:@"LICENSE" ofType:@"txt"];
-    if (gplPath) {
-        NSString *gplText = [NSString stringWithContentsOfFile:gplPath encoding:NSUTF8StringEncoding error:nil];
-        if (gplText) {
-            [body appendString:@"--------------------------------------------------------\n\n"];
-            [body appendString:gplText];
-        }
-    }
-    _licensesTextView.string = body;
-}
+- (void)showAboutPanel:(id)sender         { presentAboutDialog(); }
 
 - (void)showOpenSourceLicenses:(id)sender {
-    if (!_licensesWindow) {
-        const NSRect rect = NSMakeRect(0, 0, 620, 480);
-        _licensesWindow = [[NSWindow alloc]
-            initWithContentRect:rect
-                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable)
-                        backing:NSBackingStoreBuffered
-                          defer:NO];
-        _licensesWindow.minSize = NSMakeSize(420, 300);
-        [_licensesWindow center];
-        _licensesWindow.releasedWhenClosed = NO;
-
-        NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:_licensesWindow.contentView.bounds];
-        scrollView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-        scrollView.hasVerticalScroller = YES;
-        scrollView.borderType = NSNoBorder;
-
-        const NSSize contentSize = scrollView.contentSize;
-        NSTextView *textView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, contentSize.width, contentSize.height)];
-        textView.minSize = NSMakeSize(0.0, contentSize.height);
-        textView.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
-        textView.verticallyResizable = YES;
-        textView.horizontallyResizable = NO;
-        textView.autoresizingMask = NSViewWidthSizable;
-        textView.textContainer.containerSize = NSMakeSize(contentSize.width, CGFLOAT_MAX);
-        textView.textContainer.widthTracksTextView = YES;
-        textView.editable = NO;
-        textView.selectable = YES;
-        textView.textContainerInset = NSMakeSize(18, 16);
-        textView.backgroundColor = [NSColor textBackgroundColor];
-        textView.textColor = [NSColor textColor];
-        textView.font = [NSFont monospacedSystemFontOfSize:11.5 weight:NSFontWeightRegular];
-
-        _licensesTextView = textView;
-        scrollView.documentView = textView;
-        _licensesWindow.contentView = scrollView;
+    if (!_licensesController) {
+        _licensesController = [[LicensesWindowController alloc] init];
     }
-
-    [self refreshLicensesWindowText];
-    [_licensesWindow makeKeyAndOrderFront:nil];
+    [_licensesController showLicenses];
 }
 
 - (void)applyInputBindings:(void (^)(InputBindings &bindings))mutator {
@@ -966,21 +545,12 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     if (_settingsWindow) [_settingsWindow refreshUI];
 }
 
-- (void)toggleSwapGamepadAB:(id)sender {
-    [self applyInputBindings:^(InputBindings &b) { b.swapGamepadAB = !b.swapGamepadAB; }];
-}
+- (void)toggleSwapGamepadAB:(id)sender     { [self applyInputBindings:^(InputBindings &b) { b.swapGamepadAB = !b.swapGamepadAB; }]; }
+- (void)toggleLeftStickDpad:(id)sender     { [self applyInputBindings:^(InputBindings &b) { b.useLeftStick = !b.useLeftStick; }]; }
+- (void)resetBindingsToDefaults:(id)sender { [self applyInputBindings:^(InputBindings &b) { b = InputBindings::defaults(); }]; }
 
-- (void)toggleLeftStickDpad:(id)sender {
-    [self applyInputBindings:^(InputBindings &b) { b.useLeftStick = !b.useLeftStick; }];
-}
-
-- (void)resetBindingsToDefaults:(id)sender {
-    [self applyInputBindings:^(InputBindings &b) { b = InputBindings::defaults(); }];
-}
-
-- (uint32_t)sampleControllerMask {
+- (uint32_t)sampleKeyboardMask {
     uint32_t mask = 0;
-
     if (isBindingDown(_bindings.keys[FC_BTN_UP], _pressedKeys))     mask |= (1u << JOYPAD_UP);
     if (isBindingDown(_bindings.keys[FC_BTN_DOWN], _pressedKeys))   mask |= (1u << JOYPAD_DOWN);
     if (isBindingDown(_bindings.keys[FC_BTN_LEFT], _pressedKeys))   mask |= (1u << JOYPAD_LEFT);
@@ -989,7 +559,11 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     if (isBindingDown(_bindings.keys[FC_BTN_A], _pressedKeys))      mask |= (1u << JOYPAD_A);
     if (isBindingDown(_bindings.keys[FC_BTN_SELECT], _pressedKeys)) mask |= (1u << JOYPAD_SELECT);
     if (isBindingDown(_bindings.keys[FC_BTN_START], _pressedKeys))  mask |= (1u << JOYPAD_START);
+    return mask;
+}
 
+- (uint32_t)sampleControllerMask {
+    uint32_t mask = [self sampleKeyboardMask];
     bool l2Held = false;
     bool r2Held = false;
     bool selectHeld = false;
@@ -1010,13 +584,13 @@ bool isCartridgeContactShortcut(NSEvent *event) {
         const bool nesB = _bindings.swapGamepadAB ? faceA : faceB;
         const bool nesA = _bindings.swapGamepadAB ? faceB : faceA;
 
-        if (pad.dpad.up.pressed || stickUp)         mask |= (1u << JOYPAD_UP);
-        if (pad.dpad.down.pressed || stickDown)     mask |= (1u << JOYPAD_DOWN);
-        if (pad.dpad.left.pressed || stickLeft)     mask |= (1u << JOYPAD_LEFT);
-        if (pad.dpad.right.pressed || stickRight)   mask |= (1u << JOYPAD_RIGHT);
-        if (nesB)                                   mask |= (1u << JOYPAD_B);
-        if (nesA)                                   mask |= (1u << JOYPAD_A);
-        if (pad.buttonMenu.pressed)                 mask |= (1u << JOYPAD_START);
+        if (pad.dpad.up.pressed || stickUp)          mask |= (1u << JOYPAD_UP);
+        if (pad.dpad.down.pressed || stickDown)      mask |= (1u << JOYPAD_DOWN);
+        if (pad.dpad.left.pressed || stickLeft)      mask |= (1u << JOYPAD_LEFT);
+        if (pad.dpad.right.pressed || stickRight)    mask |= (1u << JOYPAD_RIGHT);
+        if (nesB)                                    mask |= (1u << JOYPAD_B);
+        if (nesA)                                    mask |= (1u << JOYPAD_A);
+        if (pad.buttonMenu.pressed)                  mask |= (1u << JOYPAD_START);
         if (optionsDown || pad.leftShoulder.pressed) mask |= (1u << JOYPAD_SELECT);
 
         if (_bindings.allowGamepadSaveLoad) {
@@ -1026,16 +600,14 @@ bool isCartridgeContactShortcut(NSEvent *event) {
         }
     }
 
-    if (l2Held && !_prevGamepadL2) {
-        [self quickSave:nil];
-    }
-    if (r2Held && !_prevGamepadR2 && selectHeld) {
-        [self quickLoad:nil];
-    }
+    if (l2Held && !_prevGamepadL2) [self quickSave:nil];
+    if (r2Held && !_prevGamepadR2 && selectHeld) [self quickLoad:nil];
     _prevGamepadL2 = l2Held ? YES : NO;
     _prevGamepadR2 = r2Held ? YES : NO;
     return mask;
 }
+
+#pragma mark - Emulation Loop & Lifecycle
 
 - (void)tickEmulation:(NSTimer *)timer {
     // Micro-adjust frame deadline toward nominal audio queue fill so NTSC 60.0988 Hz runs crackle-free.
@@ -1117,7 +689,7 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     [_window makeFirstResponder:_screenView];
 
     [self loadUserPreferences];
-    [self buildMenuBar];
+    [self rebuildMenuBar];
     [_window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 

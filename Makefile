@@ -14,10 +14,14 @@ OBJCFLAGS  := -fobjc-arc
 FRAMEWORKS := -framework Cocoa -framework OpenGL -framework AudioToolbox -framework GameController -framework UniformTypeIdentifiers
 
 CPP_SRCS   := src/core/FamicomCore.cpp \
-              src/core/CartridgeFaultInjector.cpp
+              src/core/CartridgeFaultInjector.cpp \
+              src/video/FreezeFrameGenerator.cpp
 MM_SRCS    := src/app/main.mm \
               src/app/AppDelegate.mm \
               src/app/AppLocalization.mm \
+              src/app/AppMenuController.mm \
+              src/app/AppPreferences.mm \
+              src/app/LicensesWindow.mm \
               src/audio/MacAudioEngine.mm \
               src/video/CrtScreenView.mm \
               src/hud/CartConnectorHud.mm \

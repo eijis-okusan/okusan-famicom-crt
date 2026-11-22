@@ -149,689 +149,74 @@ static uint8_t * MMC5BGVRAMADR(uint32_t V) {
 	} else return &MMC5BGVPage[(V) >> 10][(V)];
 }
 
-/* Okusan CRT: Rigorous 60-Pin Physical Famicom Cartridge Edge-Connector Emulation
- *
- * Models all 60 physical contacts (Front 1..30, Back 31..60) at exact 2.54 mm pitch,
- * 78.00 mm PCB width, 1.55 mm gold fingers (0.99 mm gap), and 2.80..4.50 mm console
- * phosphor-bronze spring wiper crown inside a 10.00 mm deep slot with +/-0.35 mm side play.
- *
- * Mechanical verification:
- *   Max tilt+play lateral shift (~0.66 mm) < copper-short threshold (1.215 mm).
- *   Therefore pure tilting CANNOT physically short adjacent pads on a normal connector;
- *   neighbor interference occurs physically via capacitive/creepage crosstalk onto High-Z
- *   (OPEN / MARGINAL / WEAK) pins from actively driven same-face neighbors.
- */
-static int okusan_tilt = 0;       /* -32 .. +32 (left/PRG lift .. 0 .. right/PPU lift) */
-static int okusan_lift = 0;       /*   0 .. +16 (uniform vertical pull-up) */
-static int okusan_pitch = 0;      /*  -8 .. +8  (front-back card rock in blue socket) */
-static uint64_t okusan_pin_weak_mask = 0ULL; /* Per-pin explicit WEAK fault mask (bit i = Pin i) */
-static uint64_t okusan_pin_open_mask = 0ULL; /* Per-pin explicit OPEN fault mask (bit i = Pin i) */
-static uint32_t okusan_frame_tick = 0;
-
-/* Pin index layout: 0..29 = Front Pins 1..30, 30..59 = Back Pins 31..60 */
-enum {
-	/* Front 1..30 (pos 0..29) */
-	PIN_GND1 = 0,     PIN_CPU_A11 = 1,  PIN_CPU_A10 = 2,  PIN_CPU_A9 = 3,   PIN_CPU_A8 = 4,
-	PIN_CPU_A7 = 5,   PIN_CPU_A6 = 6,   PIN_CPU_A5 = 7,   PIN_CPU_A4 = 8,   PIN_CPU_A3 = 9,
-	PIN_CPU_A2 = 10,  PIN_CPU_A1 = 11,  PIN_CPU_A0 = 12,  PIN_CPU_RW = 13,  PIN_IRQ = 14,
-	PIN_GND2 = 15,    PIN_PPU_RD = 16,  PIN_CIRAM_A10 = 17, PIN_PPU_A6 = 18, PIN_PPU_A5 = 19,
-	PIN_PPU_A4 = 20,  PIN_PPU_A3 = 21,  PIN_PPU_A2 = 22,  PIN_PPU_A1 = 23,  PIN_PPU_A0 = 24,
-	PIN_PPU_D0 = 25,  PIN_PPU_D1 = 26,  PIN_PPU_D2 = 27,  PIN_PPU_D3 = 28,  PIN_VCC_R = 29,
-	/* Back 31..60 (pos 0..29) */
-	PIN_VCC_L = 30,   PIN_M2 = 31,      PIN_CPU_A12 = 32, PIN_CPU_A13 = 33, PIN_CPU_A14 = 34,
-	PIN_CPU_D7 = 35,  PIN_CPU_D6 = 36,  PIN_CPU_D5 = 37,  PIN_CPU_D4 = 38,  PIN_CPU_D3 = 39,
-	PIN_CPU_D2 = 40,  PIN_CPU_D1 = 41,  PIN_CPU_D0 = 42,  PIN_ROMSEL = 43,  PIN_SND_IN = 44,
-	PIN_SND_OUT = 45, PIN_PPU_WR = 46,  PIN_CIRAM_CE = 47, PIN_PPU_NA13 = 48, PIN_PPU_A7 = 49,
-	PIN_PPU_A8 = 50,  PIN_PPU_A9 = 51,  PIN_PPU_A10 = 52, PIN_PPU_A11 = 53, PIN_PPU_A12 = 54,
-	PIN_PPU_A13 = 55, PIN_PPU_D7 = 56,  PIN_PPU_D6 = 57,  PIN_PPU_D5 = 58,  PIN_PPU_D4 = 59
-};
-
-enum {
-	PCLS_GND = 0,
-	PCLS_VCC = 1,
-	PCLS_SIG = 2
-};
-
-typedef struct {
-	int16_t  wear_um; /* Per-pin spring/chamfer/oxide tolerance (-200 .. +180 um) */
-	uint8_t  pclass;  /* PCLS_GND / PCLS_VCC / PCLS_SIG */
-	uint8_t  salt;
-} OkusanPin60;
-
-static const OkusanPin60 okusan_pins60_spec[OKUSAN_CART_PIN_COUNT] = {
-	/* Front 1..30 */
-	{ -120, PCLS_GND, 11 }, { -180, PCLS_SIG, 13 }, {  +60, PCLS_SIG, 17 }, {  -40, PCLS_SIG, 19 }, { +110, PCLS_SIG, 23 },
-	{ -150, PCLS_SIG, 29 }, {  +30, PCLS_SIG, 31 }, {  -90, PCLS_SIG, 37 }, { +140, PCLS_SIG, 41 }, {  -20, PCLS_SIG, 43 },
-	{ +160, PCLS_SIG, 47 }, { -110, PCLS_SIG, 53 }, {  +80, PCLS_SIG, 59 }, {  -60, PCLS_SIG, 61 }, { +120, PCLS_SIG, 67 },
-	{  -80, PCLS_GND, 71 }, {  +50, PCLS_SIG, 73 }, { -160, PCLS_SIG, 79 }, { +130, PCLS_SIG, 83 }, { -100, PCLS_SIG, 89 },
-	{  +70, PCLS_SIG, 97 }, { -190, PCLS_SIG, 101}, { +150, PCLS_SIG, 103}, {  -50, PCLS_SIG, 107}, {  +90, PCLS_SIG, 109},
-	{ -140, PCLS_SIG, 113}, { +110, PCLS_SIG, 127}, {  -70, PCLS_SIG, 131}, { +170, PCLS_SIG, 137}, {  -30, PCLS_VCC, 139},
-	/* Back 31..60 */
-	{  +90, PCLS_VCC, 149}, { -130, PCLS_SIG, 151}, { +140, PCLS_SIG, 157}, {  -70, PCLS_SIG, 163}, { +100, PCLS_SIG, 167},
-	{ -170, PCLS_SIG, 173}, {  +40, PCLS_SIG, 179}, { -110, PCLS_SIG, 181}, { +160, PCLS_SIG, 191}, {  -30, PCLS_SIG, 193},
-	{ +120, PCLS_SIG, 197}, {  -90, PCLS_SIG, 199}, { +180, PCLS_SIG, 211}, { -140, PCLS_SIG, 223}, {  +60, PCLS_SIG, 227},
-	{ -100, PCLS_SIG, 229}, {  +80, PCLS_SIG, 233}, { -150, PCLS_SIG, 239}, { +130, PCLS_SIG, 241}, {  -60, PCLS_SIG, 251},
-	{ +150, PCLS_SIG,  12}, { -120, PCLS_SIG,  24}, {  +40, PCLS_SIG,  36}, { -160, PCLS_SIG,  48}, { +110, PCLS_SIG,  60},
-	{ -190, PCLS_SIG,  72}, { +120, PCLS_SIG,  84}, { -130, PCLS_SIG,  96}, {  +70, PCLS_SIG, 108}, { -200, PCLS_SIG, 120}
-};
-
-static uint8_t  okusan_cached_pins[OKUSAN_CART_PIN_COUNT];
-static int16_t  okusan_cached_rise_um[OKUSAN_CART_PIN_COUNT];
-static int16_t  okusan_cached_overlap_um[OKUSAN_CART_PIN_COUNT];
-static int      okusan_cached_pwr_dead = 0;
-static int      okusan_cached_vcc_mv   = 4978;
-static int      okusan_cached_audio_q  = 256;
-static int      okusan_gnd_bounce_cpu_q = 0;
-static int      okusan_gnd_bounce_ppu_q = 0;
-static int      okusan_vcc_slow_q       = 0;
-
-static uint32_t okusan_last_cpu_addr = 0x8000u;
-static uint8_t  okusan_last_cpu_data = 0xEAu;
+/* Okusan CRT: Inline 2C02 PPU Bus Hooks backed by okusan_cart.c */
 static uint32_t okusan_last_ppu_addr = 0x0000u;
 static uint8_t  okusan_last_ppu_data = 0x00u;
 static uint32_t okusan_ppu_trace_div = 0;
 static uint32_t okusan_nt_trace_div  = 0;
 
-/* Live per-pin signal/data accumulators -> snapshotted each frame into okusan_frame_tel */
-static uint32_t okusan_acc_cnt[OKUSAN_CART_PIN_COUNT];
-static uint32_t okusan_acc_hi[OKUSAN_CART_PIN_COUNT];
-static uint32_t okusan_acc_tog[OKUSAN_CART_PIN_COUNT];
-static uint32_t okusan_acc_fault[OKUSAN_CART_PIN_COUNT];
-static uint8_t  okusan_acc_prev_b[OKUSAN_CART_PIN_COUNT];
-static uint16_t okusan_acc_orig_w[OKUSAN_CART_PIN_COUNT];
-static uint16_t okusan_acc_eff_w[OKUSAN_CART_PIN_COUNT];
-static OkusanPinTelemetry60 okusan_frame_tel[OKUSAN_CART_PIN_COUNT];
-
-static INLINE void okusan_trace_pin_bit(int pin, uint32_t orig_b, uint32_t eff_b, uint16_t orig_w, uint16_t eff_w) {
-	uint8_t eb = (uint8_t)(eff_b ? 1u : 0u);
-	uint8_t ob = (uint8_t)(orig_b ? 1u : 0u);
-	okusan_acc_cnt[pin]++;
-	okusan_acc_hi[pin] += eb;
-	if (eb != okusan_acc_prev_b[pin]) okusan_acc_tog[pin]++;
-	if (eb != ob) okusan_acc_fault[pin]++;
-	okusan_acc_prev_b[pin] = eb;
-	okusan_acc_orig_w[pin] = orig_w;
-	okusan_acc_eff_w[pin]  = eff_w;
-}
-
-static void okusan_finalize_frame_telemetry(void) {
-	for (int i = 0; i < OKUSAN_CART_PIN_COUNT; ++i) {
-		OkusanPinTelemetry60 *t = &okusan_frame_tel[i];
-		t->state      = okusan_cached_pins[i];
-		t->rise_um    = okusan_cached_rise_um[i];
-		t->overlap_um = okusan_cached_overlap_um[i];
-		uint32_t c = okusan_acc_cnt[i];
-		if (c > 0) {
-			t->duty_pct  = (uint8_t)((okusan_acc_hi[i] * 100u + c / 2u) / c);
-			t->fault_pct = (uint8_t)((okusan_acc_fault[i] * 100u + c / 2u) / c);
-			uint32_t tr  = (okusan_acc_tog[i] * 100u) / c;
-			t->toggling  = (uint8_t)(tr >= 12u ? 2u : (okusan_acc_tog[i] > 0u ? 1u : 0u));
-			t->bus_orig  = okusan_acc_orig_w[i];
-			t->bus_eff   = okusan_acc_eff_w[i];
-		} else {
-			/* Static / non-sampled rails: GND, +5V, M2 clock, /IRQ, Audio */
-			if (i == PIN_GND1 || i == PIN_GND2) {
-				t->duty_pct = 0; t->toggling = 0;
-				t->fault_pct = ((okusan_cached_pins[i] & 0x0F) == OKUSAN_PIN_OPEN) ? 100 : 0;
-				t->bus_orig = 0x0000u; t->bus_eff = t->fault_pct ? 0xFFFFu : 0x0000u;
-			} else if (i == PIN_VCC_L || i == PIN_VCC_R) {
-				uint8_t st = okusan_cached_pins[i] & 0x0F;
-				t->duty_pct = (st == OKUSAN_PIN_OPEN) ? 0 : (uint8_t)((okusan_cached_vcc_mv * 100) / 5000);
-				t->toggling = 0;
-				t->fault_pct = (okusan_cached_pwr_dead || st == OKUSAN_PIN_OPEN) ? 100 : (st != OKUSAN_PIN_SEATED ? 25 : 0);
-				t->bus_orig = 5000u;
-				t->bus_eff  = (st == OKUSAN_PIN_OPEN) ? 0u : (uint16_t)okusan_cached_vcc_mv;
-			} else if (i == PIN_M2) {
-				uint8_t st = okusan_cached_pins[i] & 0x0F;
-				t->duty_pct = (st == OKUSAN_PIN_OPEN) ? 100 : 62; t->toggling = (st == OKUSAN_PIN_OPEN) ? 0 : 2;
-				t->fault_pct = (st == OKUSAN_PIN_OPEN) ? 100 : (st == OKUSAN_PIN_MARGINAL ? 45 : 0);
-				t->bus_orig = 1789u; t->bus_eff = (st == OKUSAN_PIN_OPEN) ? 0u : 1789u;
-			} else if (i == PIN_SND_IN || i == PIN_SND_OUT) {
-				t->duty_pct = (uint8_t)((okusan_cached_audio_q * 100) / 256);
-				t->toggling = (okusan_cached_audio_q > 0) ? 2 : 0;
-				t->fault_pct = (uint8_t)(100 - t->duty_pct);
-				t->bus_orig = 256u; t->bus_eff = (uint16_t)okusan_cached_audio_q;
-			} else {
-				uint8_t st = okusan_cached_pins[i] & 0x0F;
-				t->duty_pct = 100; t->toggling = 0;
-				t->fault_pct = (st == OKUSAN_PIN_OPEN) ? 100 : 0;
-				t->bus_orig = 1u; t->bus_eff = (st == OKUSAN_PIN_OPEN) ? 0u : 1u;
-			}
-		}
-		okusan_acc_cnt[i] = 0;
-		okusan_acc_hi[i]  = 0;
-		okusan_acc_tog[i] = 0;
-		okusan_acc_fault[i] = 0;
-	}
-}
-
-__attribute__((visibility("default")))
-void okusan_trace_cpu_bus(uint32_t orig_a, uint32_t eff_a, uint8_t orig_d, uint8_t eff_d, int is_write) {
-	static const int cpu_addr_pin[15] = {
-		PIN_CPU_A0,  PIN_CPU_A1,  PIN_CPU_A2,  PIN_CPU_A3,  PIN_CPU_A4,
-		PIN_CPU_A5,  PIN_CPU_A6,  PIN_CPU_A7,  PIN_CPU_A8,  PIN_CPU_A9,
-		PIN_CPU_A10, PIN_CPU_A11, PIN_CPU_A12, PIN_CPU_A13, PIN_CPU_A14
-	};
-	static const int cpu_data_pin[8] = {
-		PIN_CPU_D0, PIN_CPU_D1, PIN_CPU_D2, PIN_CPU_D3,
-		PIN_CPU_D4, PIN_CPU_D5, PIN_CPU_D6, PIN_CPU_D7
-	};
-	uint16_t oa16 = (uint16_t)(orig_a & 0xFFFFu);
-	uint16_t ea16 = (uint16_t)(eff_a & 0xFFFFu);
-	for (int b = 0; b < 15; ++b) {
-		okusan_trace_pin_bit(cpu_addr_pin[b], (oa16 >> b) & 1u, (ea16 >> b) & 1u, oa16, ea16);
-	}
-	uint32_t rw_o = is_write ? 0u : 1u;
-	uint32_t rw_e = ((okusan_cached_pins[PIN_CPU_RW] & 0x0Fu) == OKUSAN_PIN_OPEN) ? 1u : rw_o;
-	okusan_trace_pin_bit(PIN_CPU_RW, rw_o, rw_e, (uint16_t)rw_o, (uint16_t)rw_e);
-
-	uint32_t rom_o = (orig_a >= 0x8000u) ? 0u : 1u;
-	uint32_t rom_e = ((okusan_cached_pins[PIN_ROMSEL] & 0x0Fu) == OKUSAN_PIN_OPEN) ? 1u : rom_o;
-	okusan_trace_pin_bit(PIN_ROMSEL, rom_o, rom_e, oa16, (uint16_t)(rom_e ? 0xFFFFu : ea16));
-
-	if (orig_a >= 0x8000u || is_write) {
-		for (int b = 0; b < 8; ++b) {
-			okusan_trace_pin_bit(cpu_data_pin[b], (orig_d >> b) & 1u, (eff_d >> b) & 1u, orig_d, eff_d);
-		}
-	}
-}
-
-static INLINE int okusan_pin_x_um(int idx) {
-	int pos = (idx < 30) ? idx : (idx - 30);
-	return (pos * 2 - 29) * (OKUSAN_PIN_PITCH_UM / 2);
-}
-
-/* Rigid-body straight PCB edge rise in micrometers: zero floor clipping (~4.3 deg chute limit) */
-__attribute__((visibility("default")))
-int okusan_cart_edge_rise_um(int tilt, int lift, int x_um) {
-	int lift_um = lift * 330;
-	if (tilt == 0) return lift_um;
-	int at = tilt < 0 ? -tilt : tilt;
-	int dist_um = (tilt > 0) ? (x_um + OKUSAN_CARD_HALF_UM) : (OKUSAN_CARD_HALF_UM - x_um);
-	if (dist_um < 0) dist_um = 0;
-	int tilt_um = (at * 185 * dist_um) / (2 * OKUSAN_CARD_HALF_UM);
-	return lift_um + tilt_um;
-}
-
-/* Per-pin 3-DOF rigid rise (tilt + lift + front-back rock lever across 1.6mm PCB) */
-static INLINE int okusan_cart_pin_rise_um(int tilt, int lift, int pitch, int pin_idx) {
-	int r = okusan_cart_edge_rise_um(tilt, lift, okusan_pin_x_um(pin_idx));
-	if (pitch != 0) {
-		/* pitch > 0: rocked forward -> minor vertical lever across 1.6mm PCB (dominant effect is normal preload) */
-		int face_lift = (pin_idx < 30) ? (-pitch * 45) : (+pitch * 45);
-		r += face_lift;
-		if (r < 0) r = 0;
-	}
-	return r;
-}
-
-__attribute__((visibility("default")))
-int okusan_cart_lat_shift_um(int tilt, int lift) {
-	int at = tilt < 0 ? -tilt : tilt;
-	if (at == 0) return 0;
-	int eff_h = 3350 - (lift * 330) / 2;
-	if (eff_h < 800) eff_h = 800;
-	int geom = (at * 185 * eff_h) / (2 * OKUSAN_CARD_HALF_UM);
-	int play = (at * OKUSAN_SLOT_PLAY_UM) / 32;
-	return geom + play;
-}
-
-/* Very slow, rare contact micro-drift (~2.1 sec step at 60 Hz) so faults stay rock-steady */
-static INLINE uint32_t okusan_frame_drift(uint32_t salt) {
-	uint32_t step = (okusan_frame_tick >> 7) + salt * 41u;
-	uint32_t h = (step ^ (step >> 3)) * 2246822519u;
-	return (h >> 24) & 255u;
-}
-
-static INLINE uint32_t okusan_pin_chatter(uint32_t salt) {
-	return okusan_frame_drift(salt + 17u);
-}
-
-/* Contact resistance in 0.1-ohm units (dOhm) for power-rail Ohm's law brownout model */
-static INLINE int okusan_pin_res_dohm(uint8_t st, int ov_um) {
-	uint8_t base = st & 0x0Fu;
-	if (base == OKUSAN_PIN_SEATED) return 2; /* 0.2 ohm */
-	if (base == OKUSAN_PIN_WEAK) {
-		int d = 960 - ov_um;
-		if (d < 0) d = 0;
-		return 2 + (d * 40) / 540; /* 0.2 .. 4.2 ohm */
-	}
-	if (base == OKUSAN_PIN_MARGINAL) {
-		int d = 420 - ov_um;
-		if (d < 0) d = 0;
-		return 80 + (d * 400) / 380; /* 8.0 .. 48.0 ohm oxidized tip point contact */
-	}
-	return 100000; /* 10 kOhm open */
-}
-
-static void okusan_refresh_frame_cache(void) {
-	int i;
-	const int any_geom = (okusan_tilt != 0 || okusan_lift != 0 || okusan_pitch != 0);
-	const int any_mask = (okusan_pin_weak_mask != 0ULL || okusan_pin_open_mask != 0ULL);
-	if (!any_geom) {
-		for (i = 0; i < OKUSAN_CART_PIN_COUNT; ++i) {
-			okusan_cached_pins[i]       = OKUSAN_PIN_SEATED;
-			okusan_cached_rise_um[i]    = 0;
-			okusan_cached_overlap_um[i] = OKUSAN_WIPER_TOP_UM - OKUSAN_WIPER_BOT_UM;
-		}
-		if (!any_mask) {
-			okusan_cached_vcc_mv    = 4978;
-			okusan_cached_pwr_dead  = 0;
-			okusan_cached_audio_q   = 256;
-			okusan_gnd_bounce_cpu_q = 0;
-			okusan_gnd_bounce_ppu_q = 0;
-			okusan_vcc_slow_q       = 0;
-			return;
-		}
-	} else {
-		/* Lateral pad-to-wiper width reduction from tilt+play shear (without adjacent copper bridging) */
-		int lat_um = okusan_cart_lat_shift_um(okusan_tilt, okusan_lift);
-		int lat_ov_w = (OKUSAN_PAD_WIDTH_UM + OKUSAN_WIPER_WIDTH_UM) / 2 - lat_um;
-		if (lat_ov_w > OKUSAN_WIPER_WIDTH_UM) lat_ov_w = OKUSAN_WIPER_WIDTH_UM;
-		if (lat_ov_w < 0) lat_ov_w = 0;
-
-		for (i = 0; i < OKUSAN_CART_PIN_COUNT; ++i) {
-			int rise = okusan_cart_pin_rise_um(okusan_tilt, okusan_lift, okusan_pitch, i);
-			int eff_bot = OKUSAN_PAD_BOT_UM + rise + okusan_pins60_spec[i].wear_um;
-			int eff_top = OKUSAN_PAD_TOP_UM + rise + okusan_pins60_spec[i].wear_um;
-			int ov_lo = eff_bot > OKUSAN_WIPER_BOT_UM ? eff_bot : OKUSAN_WIPER_BOT_UM;
-			int ov_hi = eff_top < OKUSAN_WIPER_TOP_UM ? eff_top : OKUSAN_WIPER_TOP_UM;
-			int ov_v = ov_hi - ov_lo;
-			if (ov_v < 0) ov_v = 0;
-			if (ov_v > (OKUSAN_WIPER_TOP_UM - OKUSAN_WIPER_BOT_UM)) {
-				ov_v = OKUSAN_WIPER_TOP_UM - OKUSAN_WIPER_BOT_UM;
-			}
-
-			/* Spring wiper normal preload (450um nominal): pitch > 0 loads Front, unloads Back */
-			int preload_um = 450 + ((i < 30) ? (+okusan_pitch * 68) : (-okusan_pitch * 68));
-			int eff_preload = preload_um > 450 ? 450 : (preload_um < 0 ? 0 : preload_um);
-			int ov = (ov_v * lat_ov_w) / OKUSAN_WIPER_WIDTH_UM;
-			ov = (ov * eff_preload) / 450;
-
-			uint32_t d = okusan_frame_drift(okusan_pins60_spec[i].salt);
-			uint8_t st;
-			if (ov >= 960) {
-				st = OKUSAN_PIN_SEATED;
-			} else if (ov >= 920) {
-				st = (d < 24u) ? OKUSAN_PIN_WEAK : OKUSAN_PIN_SEATED;
-			} else if (ov >= 420) {
-				st = OKUSAN_PIN_WEAK;
-			} else if (ov >= 380) {
-				st = (d < 24u) ? OKUSAN_PIN_MARGINAL : OKUSAN_PIN_WEAK;
-			} else if (ov >= 70) {
-				st = OKUSAN_PIN_MARGINAL;
-			} else if (ov >= 40) {
-				st = (d < 24u) ? OKUSAN_PIN_OPEN : OKUSAN_PIN_MARGINAL;
-			} else {
-				st = OKUSAN_PIN_OPEN;
-			}
-
-			okusan_cached_pins[i]       = st;
-			okusan_cached_rise_um[i]    = (int16_t)rise;
-			okusan_cached_overlap_um[i] = (int16_t)ov;
-		}
-	}
-
-	if (any_mask) {
-		for (i = 0; i < OKUSAN_CART_PIN_COUNT; ++i) {
-			uint64_t bit = 1ULL << i;
-			if (okusan_pin_open_mask & bit) {
-				okusan_cached_pins[i]       = OKUSAN_PIN_OPEN;
-				okusan_cached_overlap_um[i] = 0;
-				if (okusan_cached_rise_um[i] < 2400) okusan_cached_rise_um[i] = 2400;
-			} else if ((okusan_pin_weak_mask & bit) && (okusan_cached_pins[i] & 0x0Fu) < OKUSAN_PIN_WEAK) {
-				int weak_ov = 700 + okusan_pins60_spec[i].wear_um;
-				if (weak_ov < 440) weak_ov = 440;
-				if (weak_ov > 940) weak_ov = 940;
-				okusan_cached_pins[i]       = OKUSAN_PIN_WEAK;
-				okusan_cached_overlap_um[i] = (int16_t)weak_ov;
-				if (okusan_cached_rise_um[i] < 900) okusan_cached_rise_um[i] = 900;
-			}
-		}
-	}
-
-	/* Strict Ohm's-law power rail calculation across Pin 1/16 (GND) & Pin 30/31 (+5V) at ~110mA load */
-	int r_gnd1 = okusan_pin_res_dohm(okusan_cached_pins[PIN_GND1],  okusan_cached_overlap_um[PIN_GND1]);
-	int r_gnd2 = okusan_pin_res_dohm(okusan_cached_pins[PIN_GND2],  okusan_cached_overlap_um[PIN_GND2]);
-	int r_vccL = okusan_pin_res_dohm(okusan_cached_pins[PIN_VCC_L], okusan_cached_overlap_um[PIN_VCC_L]);
-	int r_vccR = okusan_pin_res_dohm(okusan_cached_pins[PIN_VCC_R], okusan_cached_overlap_um[PIN_VCC_R]);
-	long long rg = ((long long)r_gnd1 * r_gnd2) / (r_gnd1 + r_gnd2);
-	long long rv = ((long long)r_vccL * r_vccR) / (r_vccL + r_vccR);
-	long long drop_mv = (rg + rv) * 11LL; /* 1 dOhm (0.1 ohm) * 110 mA = 11 mV */
-	int vcc_mv = (drop_mv >= 5000LL) ? 0 : (int)(5000LL - drop_mv);
-	okusan_cached_vcc_mv    = vcc_mv;
-	okusan_cached_pwr_dead  = (vcc_mv < 3400) ? 1 : 0; /* < 3.40V brownout cutoff -> unpowered */
-	okusan_vcc_slow_q       = (vcc_mv >= 3400 && vcc_mv < 4350) ? (((4350 - vcc_mv) * 140) / 950) : 0;
-	okusan_gnd_bounce_cpu_q = (r_gnd1 > r_gnd2 + 10) ? (r_gnd1 > 100 ? 72 : (r_gnd1 * 72) / 100) : 0;
-	okusan_gnd_bounce_ppu_q = (r_gnd2 > r_gnd1 + 10) ? (r_gnd2 > 100 ? 72 : (r_gnd2 * 72) / 100) : 0;
-
-	int s_in  = okusan_cached_pins[PIN_SND_IN]  & 0x0F;
-	int s_out = okusan_cached_pins[PIN_SND_OUT] & 0x0F;
-	int s_worst = s_in > s_out ? s_in : s_out;
-	if (s_worst == OKUSAN_PIN_SEATED)        okusan_cached_audio_q = 256;
-	else if (s_worst == OKUSAN_PIN_WEAK)     okusan_cached_audio_q = 192;
-	else if (s_worst == OKUSAN_PIN_MARGINAL) okusan_cached_audio_q = (int)(72u + (okusan_frame_drift(227u) >> 1));
-	else                                     okusan_cached_audio_q = 0;
-
-	for (i = 0; i < OKUSAN_CART_PIN_COUNT; ++i) {
-		uint8_t st = okusan_cached_pins[i] & 0x0F;
-		if (st == OKUSAN_PIN_SEATED || okusan_pins60_spec[i].pclass != PCLS_SIG) continue;
-		int pos = (i < 30) ? i : (i - 30);
-		if (pos > 0) {
-			uint8_t nst = okusan_cached_pins[i - 1] & 0x0F;
-			if (okusan_pins60_spec[i - 1].pclass != PCLS_GND && nst != OKUSAN_PIN_OPEN) {
-				okusan_cached_pins[i] |= OKUSAN_PIN_FLAG_XTALK_L;
-			}
-		}
-		if (pos < 29) {
-			uint8_t nst = okusan_cached_pins[i + 1] & 0x0F;
-			if (okusan_pins60_spec[i + 1].pclass != PCLS_GND && nst != OKUSAN_PIN_OPEN) {
-				okusan_cached_pins[i] |= OKUSAN_PIN_FLAG_XTALK_R;
-			}
-		}
-	}
-}
-
-__attribute__((visibility("default")))
-void okusan_set_cart_contact3(int tilt, int lift, int pitch) {
-	if (tilt < -32) tilt = -32;
-	if (tilt > 32)  tilt = 32;
-	if (lift < 0)   lift = 0;
-	if (lift > 16)  lift = 16;
-	if (pitch < -8) pitch = -8;
-	if (pitch > 8)  pitch = 8;
-	okusan_tilt  = tilt;
-	okusan_lift  = lift;
-	okusan_pitch = pitch;
-	okusan_refresh_frame_cache();
-}
-
-__attribute__((visibility("default")))
-void okusan_set_cart_contact(int tilt, int lift) {
-	okusan_set_cart_contact3(tilt, lift, 0);
-}
-
-__attribute__((visibility("default")))
-void okusan_set_pin_fault_masks(uint64_t weak_mask, uint64_t open_mask) {
-	okusan_pin_weak_mask = weak_mask;
-	okusan_pin_open_mask = open_mask;
-	okusan_refresh_frame_cache();
-}
-
-__attribute__((visibility("default")))
-int okusan_cart_is_active(void) {
-	return (okusan_tilt != 0 || okusan_lift != 0 || okusan_pitch != 0 ||
-	        okusan_pin_weak_mask != 0ULL || okusan_pin_open_mask != 0ULL);
-}
-
-__attribute__((visibility("default")))
-int okusan_cart_is_powered(void) {
-	return okusan_cached_pwr_dead ? 0 : 1;
-}
-
-__attribute__((visibility("default")))
-int okusan_cart_vcc_mv(void) {
-	return okusan_cached_vcc_mv;
-}
-
-__attribute__((visibility("default")))
-void okusan_get_pin_telemetry60(int *out_tilt, int *out_lift, int *out_pitch,
-                                OkusanPinTelemetry60 *out_tel, int max_pins) {
-	if (out_tilt)  *out_tilt  = okusan_tilt;
-	if (out_lift)  *out_lift  = okusan_lift;
-	if (out_pitch) *out_pitch = okusan_pitch;
-	if (!out_tel || max_pins <= 0) return;
-	int n = max_pins < OKUSAN_CART_PIN_COUNT ? max_pins : OKUSAN_CART_PIN_COUNT;
-	for (int i = 0; i < n; ++i) {
-		out_tel[i] = okusan_frame_tel[i];
-		out_tel[i].state      = okusan_cached_pins[i];
-		out_tel[i].rise_um    = okusan_cached_rise_um[i];
-		out_tel[i].overlap_um = okusan_cached_overlap_um[i];
-	}
-}
-
-__attribute__((visibility("default")))
-int okusan_get_audio_contact_q(void) {
-	return okusan_cached_audio_q;
-}
-
-static INLINE uint32_t okusan_pin_xfer_bit(
-	int pin_idx, uint32_t val_bit, uint32_t prev_bit,
-	uint32_t xtalk_l_bit, uint32_t xtalk_r_bit, uint32_t float_bit,
-	uint32_t bus_hash, int is_ppu) {
-	uint8_t raw = okusan_cached_pins[pin_idx];
-	uint8_t st  = raw & 0x0Fu;
-	uint32_t vb = val_bit ? 1u : 0u;
-	uint32_t pb = prev_bit ? 1u : 0u;
-	int stress_q = (is_ppu ? okusan_gnd_bounce_ppu_q : okusan_gnd_bounce_cpu_q) + okusan_vcc_slow_q;
-
-	if (st == OKUSAN_PIN_SEATED) {
-		if (stress_q > 0 && vb != pb) {
-			uint32_t h = (bus_hash ^ okusan_pins60_spec[pin_idx].salt ^ (okusan_frame_tick >> 7)) & 255u;
-			if (h < (uint32_t)(stress_q / 3)) return pb;
-		}
-		return vb;
-	}
-
-	uint32_t fb = float_bit ? 1u : 0u;
-	int has_xl = (raw & OKUSAN_PIN_FLAG_XTALK_L) != 0;
-	int has_xr = (raw & OKUSAN_PIN_FLAG_XTALK_R) != 0;
-	uint32_t xb = has_xl ? (xtalk_l_bit ? 1u : 0u) : (has_xr ? (xtalk_r_bit ? 1u : 0u) : fb);
-	uint32_t drift = okusan_pin_chatter(okusan_pins60_spec[pin_idx].salt);
-
-	if (st == OKUSAN_PIN_WEAK) {
-		/* Asymmetric RC slew lag: 0->1 pull-up rises slower than 1->0 NMOS sink, scaled continuously by area */
-		int ov = okusan_cached_overlap_um[pin_idx];
-		int weak_q = ((960 - ov) * 205) / 540 + stress_q;
-		if (weak_q < 0) weak_q = 0;
-		if (weak_q > 255) weak_q = 255;
-		uint32_t phase = (bus_hash + okusan_pins60_spec[pin_idx].salt * 19u + (drift >> 3)) & 255u;
-		if (!is_ppu && ov >= 620) {
-			/* On light/medium oxidized CPU pins, slew glitch occurs only on rare edge transitions
-			 * (~1 in 2048 transitions) so the game boots past the reset vector and glitches/crashes organically. */
-			if (((bus_hash ^ okusan_frame_tick) & 15u) != 0u) return vb;
-			phase = ((bus_hash * 29u) + (drift >> 1)) & 1023u;
-			weak_q = (weak_q >> 5) + 1;
-		}
-		if (vb && !pb) {
-			if (phase < (uint32_t)weak_q) return 0u;
-		} else if (!vb && pb) {
-			int fall_q = (weak_q > 130) ? ((weak_q - 130) * 2) : 0;
-			if (phase < (uint32_t)fall_q) return 1u;
-		} else if (weak_q >= 235 && phase < 24u) {
-			return pb ^ 1u;
-		}
-		return vb;
-	}
-
-	if (st == OKUSAN_PIN_MARGINAL) {
-		/* Grazing chamfer contact: holds neighbor/prev steadily, with only very rare glitches */
-		if (drift < 12u) return fb;
-		if (has_xl || has_xr) return xb;
-		return (vb != pb) ? pb : vb;
-	}
-
-	/* OKUSAN_PIN_OPEN: High-Z capacitive coupling tracks driven neighbor stably, else floats */
-	if ((has_xl || has_xr) && xb != fb) return xb;
-	return fb;
-}
-
-static INLINE uint32_t okusan_map_cpu_addr_bits(uint32_t addr) {
-	static const int cpu_addr_pin[15] = {
-		PIN_CPU_A0,  PIN_CPU_A1,  PIN_CPU_A2,  PIN_CPU_A3,  PIN_CPU_A4,
-		PIN_CPU_A5,  PIN_CPU_A6,  PIN_CPU_A7,  PIN_CPU_A8,  PIN_CPU_A9,
-		PIN_CPU_A10, PIN_CPU_A11, PIN_CPU_A12, PIN_CPU_A13, PIN_CPU_A14
-	};
-	static const int xtalk_l_bit[15] = {
-		 1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, -1, -1, 12, 13
-	};
-	static const int xtalk_r_bit[15] = {
-		-1,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 13, 14, -1
-	};
-
-	uint32_t prev = okusan_last_cpu_addr;
-	uint32_t bh = (addr ^ (addr >> 7)) & 255u;
-	uint32_t out = 0u;
-	for (int b = 0; b < 15; ++b) {
-		uint32_t vb = (addr >> b) & 1u;
-		uint32_t pb = (prev >> b) & 1u;
-		uint32_t xl = (xtalk_l_bit[b] >= 0) ? ((addr >> xtalk_l_bit[b]) & 1u) : 0u;
-		uint32_t xr = (xtalk_r_bit[b] >= 0) ? ((addr >> xtalk_r_bit[b]) & 1u) : 1u;
-		uint32_t rb = okusan_pin_xfer_bit(cpu_addr_pin[b], vb, pb, xl, xr, 1u, bh + (uint32_t)b * 7u, 0);
-		out |= (rb << b);
-	}
-	okusan_last_cpu_addr = addr;
-	return out;
-}
-
-static INLINE uint8_t okusan_map_cpu_data_bits(uint8_t val, uint8_t open_bus) {
-	static const int cpu_data_pin[8] = {
-		PIN_CPU_D0, PIN_CPU_D1, PIN_CPU_D2, PIN_CPU_D3,
-		PIN_CPU_D4, PIN_CPU_D5, PIN_CPU_D6, PIN_CPU_D7
-	};
-	uint32_t prev = okusan_last_cpu_data;
-	uint32_t bh = (okusan_last_cpu_addr ^ ((uint32_t)val << 3)) & 255u;
-	uint32_t out = 0u;
-	for (int b = 0; b < 8; ++b) {
-		uint32_t vb = ((uint32_t)val >> b) & 1u;
-		uint32_t pb = (prev >> b) & 1u;
-		uint32_t xl = (b < 7) ? (((uint32_t)val >> (b + 1)) & 1u) : ((okusan_last_cpu_addr >> 14) & 1u);
-		uint32_t xr = (b > 0) ? (((uint32_t)val >> (b - 1)) & 1u) : 0u;
-		uint32_t fb = ((uint32_t)open_bus >> b) & 1u;
-		if ((okusan_cached_pins[cpu_data_pin[b]] & 0x0Fu) == OKUSAN_PIN_OPEN &&
-		    okusan_pin_chatter(211u + (uint32_t)b) < 72u) {
-			fb = 1u;
-		}
-		uint32_t rb = okusan_pin_xfer_bit(cpu_data_pin[b], vb, pb, xl, xr, fb, bh + (uint32_t)b * 13u, 0);
-		out |= (rb << b);
-	}
-	okusan_last_cpu_data = val;
-	return (uint8_t)out;
-}
-
-static INLINE int okusan_ctrl_pin_dropped(int pin_idx, uint32_t salt, uint32_t thresh) {
-	uint8_t st = okusan_cached_pins[pin_idx] & 0x0Fu;
-	return (st == OKUSAN_PIN_OPEN ||
-	        (st == OKUSAN_PIN_MARGINAL && okusan_pin_chatter(salt) < thresh));
-}
-
-/* Real 6502 cartridge bus hooks ($4020-$FFFF) called from x6502.c */
-uint32_t okusan_prg_map_addr(uint32_t addr, int *romsel_open) {
-	if (romsel_open) *romsel_open = 0;
-	if (!okusan_cart_is_active() || addr < 0x4020u) return addr;
-	if (okusan_cached_pwr_dead) {
-		if (romsel_open) *romsel_open = 1;
-		return addr;
-	}
-
-	if (addr >= 0x8000u && okusan_ctrl_pin_dropped(PIN_ROMSEL, 101u, 95u)) {
-		if (romsel_open) *romsel_open = 1;
-		return addr;
-	}
-
-	uint32_t a15_hi = addr & ~0x7FFFu;
-	return a15_hi | okusan_map_cpu_addr_bits(addr);
-}
-
-uint8_t okusan_prg_map_data(uint8_t val, uint8_t open_bus) {
-	if (!okusan_cart_is_active()) return val;
-	if (okusan_cached_pwr_dead) return open_bus;
-	return okusan_map_cpu_data_bits(val, open_bus);
-}
-
-int okusan_cpu_map_write(uint32_t addr, uint8_t val, uint32_t *out_addr, uint8_t *out_val) {
-	*out_addr = addr;
-	*out_val  = val;
-	if (!okusan_cart_is_active() || addr < 0x4020u) return 1;
-	if (okusan_cached_pwr_dead) return 0;
-
-	if (okusan_ctrl_pin_dropped(PIN_CPU_RW, 149u, 110u)) return 0;
-	if (okusan_ctrl_pin_dropped(PIN_M2,     151u, 100u)) return 0;
-	if (addr >= 0x8000u && okusan_ctrl_pin_dropped(PIN_ROMSEL, 157u, 95u)) return 0;
-
-	*out_addr = (addr & ~0x7FFFu) | okusan_map_cpu_addr_bits(addr);
-	*out_val  = okusan_map_cpu_data_bits(val, okusan_last_cpu_data);
-	return 1;
-}
-
-__attribute__((visibility("default")))
-int okusan_map_irq(int irq_low) {
-	int ext = irq_low & (FCEU_IQEXT | FCEU_IQEXT2);
-	if (!ext) return irq_low;
-	if (!okusan_cart_is_active()) {
-		okusan_trace_pin_bit(PIN_IRQ, 0u, 0u, (uint16_t)irq_low, (uint16_t)irq_low);
-		return irq_low;
-	}
-	if (okusan_cached_pwr_dead || okusan_ctrl_pin_dropped(PIN_IRQ, 67u, 110u)) {
-		okusan_trace_pin_bit(PIN_IRQ, 0u, 1u, 0u, 1u);
-		return irq_low & ~(FCEU_IQEXT | FCEU_IQEXT2);
-	}
-	okusan_trace_pin_bit(PIN_IRQ, 0u, 0u, 0u, 0u);
-	return irq_low;
-}
-
 static INLINE void okusan_trace_ppu_addr_pins(uint32_t orig_a, uint32_t eff_a) {
 	static const int ppu_addr_pin[14] = {
-		PIN_PPU_A0, PIN_PPU_A1, PIN_PPU_A2,  PIN_PPU_A3,  PIN_PPU_A4,  PIN_PPU_A5,  PIN_PPU_A6,
-		PIN_PPU_A7, PIN_PPU_A8, PIN_PPU_A9,  PIN_PPU_A10, PIN_PPU_A11, PIN_PPU_A12, PIN_PPU_A13
+		OKUSAN_PIN_PPU_A0, OKUSAN_PIN_PPU_A1, OKUSAN_PIN_PPU_A2,  OKUSAN_PIN_PPU_A3,  OKUSAN_PIN_PPU_A4,  OKUSAN_PIN_PPU_A5,  OKUSAN_PIN_PPU_A6,
+		OKUSAN_PIN_PPU_A7, OKUSAN_PIN_PPU_A8, OKUSAN_PIN_PPU_A9,  OKUSAN_PIN_PPU_A10, OKUSAN_PIN_PPU_A11, OKUSAN_PIN_PPU_A12, OKUSAN_PIN_PPU_A13
 	};
 	uint16_t oa = (uint16_t)(orig_a & 0x3FFFu);
 	uint16_t ea = (uint16_t)(eff_a  & 0x3FFFu);
-	for (int b = 0; b < 14; ++b) {
-		okusan_trace_pin_bit(ppu_addr_pin[b], (oa >> b) & 1u, (ea >> b) & 1u, oa, ea);
+	for (int bit = 0; bit < 14; ++bit) {
+		okusan_trace_pin_bit(ppu_addr_pin[bit], (oa >> bit) & 1u, (ea >> bit) & 1u, oa, ea);
 	}
-	uint32_t na13_o = ((oa >> 13) & 1u) ^ 1u;
-	uint32_t na13_e = ((okusan_cached_pins[PIN_PPU_NA13] & 0x0Fu) == OKUSAN_PIN_OPEN) ? 1u : na13_o;
-	okusan_trace_pin_bit(PIN_PPU_NA13, na13_o, na13_e, (uint16_t)na13_o, (uint16_t)na13_e);
-	uint32_t rd_o = 0u; /* PPU /RD is LOW during pattern/NT read fetches */
-	uint32_t rd_e = ((okusan_cached_pins[PIN_PPU_RD] & 0x0Fu) == OKUSAN_PIN_OPEN) ? 1u : 0u;
-	okusan_trace_pin_bit(PIN_PPU_RD, rd_o, rd_e, oa, ea);
+	uint32_t na13_orig = ((oa >> 13) & 1u) ^ 1u;
+	uint32_t na13_eff  = ((okusan_cart_rt.cached_pins[OKUSAN_PIN_PPU_NA13] & 0x0Fu) == OKUSAN_PIN_OPEN) ? 1u : na13_orig;
+	okusan_trace_pin_bit(OKUSAN_PIN_PPU_NA13, na13_orig, na13_eff, (uint16_t)na13_orig, (uint16_t)na13_eff);
+	uint32_t rd_eff = ((okusan_cart_rt.cached_pins[OKUSAN_PIN_PPU_RD] & 0x0Fu) == OKUSAN_PIN_OPEN) ? 1u : 0u;
+	okusan_trace_pin_bit(OKUSAN_PIN_PPU_RD, 0u, rd_eff, oa, ea);
 }
 
 static INLINE void okusan_trace_ppu_data_pins(uint8_t orig_d, uint8_t eff_d) {
 	static const int ppu_data_pin[8] = {
-		PIN_PPU_D0, PIN_PPU_D1, PIN_PPU_D2, PIN_PPU_D3,
-		PIN_PPU_D4, PIN_PPU_D5, PIN_PPU_D6, PIN_PPU_D7
+		OKUSAN_PIN_PPU_D0, OKUSAN_PIN_PPU_D1, OKUSAN_PIN_PPU_D2, OKUSAN_PIN_PPU_D3,
+		OKUSAN_PIN_PPU_D4, OKUSAN_PIN_PPU_D5, OKUSAN_PIN_PPU_D6, OKUSAN_PIN_PPU_D7
 	};
-	for (int b = 0; b < 8; ++b) {
-		okusan_trace_pin_bit(ppu_data_pin[b], (orig_d >> b) & 1u, (eff_d >> b) & 1u, orig_d, eff_d);
+	for (int bit = 0; bit < 8; ++bit) {
+		okusan_trace_pin_bit(ppu_data_pin[bit], (orig_d >> bit) & 1u, (eff_d >> bit) & 1u, orig_d, eff_d);
 	}
 }
 
-static INLINE int okusan_map_nt(int ntIdx) {
-	uint32_t bit = (uint32_t)(ntIdx & 1);
+static INLINE int okusan_map_nt(int nt_idx) {
+	uint32_t a10_bit = (uint32_t)(nt_idx & 1);
 	if (!okusan_cart_is_active()) {
 		if ((okusan_nt_trace_div & 63u) == 0u) {
-			okusan_trace_pin_bit(PIN_CIRAM_A10, bit, bit, (uint16_t)ntIdx, (uint16_t)ntIdx);
+			okusan_trace_pin_bit(OKUSAN_PIN_CIRAM_A10, a10_bit, a10_bit, (uint16_t)nt_idx, (uint16_t)nt_idx);
 		}
-		return ntIdx;
+		return nt_idx;
 	}
-	uint32_t a6  = (okusan_last_ppu_addr >> 6) & 1u;
-	uint32_t mapped = okusan_pin_xfer_bit(PIN_CIRAM_A10, bit, bit, 0u, a6, 1u, okusan_last_ppu_addr & 255u, 1);
-	int res = (ntIdx & ~1) | (int)mapped;
+	uint32_t right_a6 = (okusan_last_ppu_addr >> 6) & 1u;
+	uint32_t mapped = okusan_pin_xfer_bit(OKUSAN_PIN_CIRAM_A10, a10_bit, a10_bit, 0u, right_a6, 1u,
+	                                      okusan_last_ppu_addr & 255u, 1);
+	int result = (nt_idx & ~1) | (int)mapped;
 	if ((okusan_nt_trace_div & 63u) == 0u) {
-		okusan_trace_pin_bit(PIN_CIRAM_A10, bit, mapped, (uint16_t)ntIdx, (uint16_t)res);
+		okusan_trace_pin_bit(OKUSAN_PIN_CIRAM_A10, a10_bit, mapped, (uint16_t)nt_idx, (uint16_t)result);
 	}
-	return res;
+	return result;
 }
 
 static INLINE uint8_t okusan_read_nt_byte(const uint8_t *nt_page, uint32_t off) {
-	uint32_t do_tr = ((++okusan_nt_trace_div & 63u) == 0u);
+	uint32_t sample_trace = ((++okusan_nt_trace_div & 63u) == 0u);
 	if (!okusan_cart_is_active()) {
-		if (do_tr) {
-			okusan_trace_pin_bit(PIN_CIRAM_CE, 0u, 0u, (uint16_t)(0x2000u | off), (uint16_t)(0x2000u | off));
+		if (sample_trace) {
+			okusan_trace_pin_bit(OKUSAN_PIN_CIRAM_CE, 0u, 0u, (uint16_t)(0x2000u | off), (uint16_t)(0x2000u | off));
 			okusan_trace_ppu_addr_pins(0x2000u | off, 0x2000u | off);
 		}
 		return nt_page[off];
 	}
-	uint8_t ce_st  = okusan_cached_pins[PIN_CIRAM_CE] & 0x0Fu;
-	uint8_t na13   = okusan_cached_pins[PIN_PPU_NA13] & 0x0Fu;
-	int open_bus_nt = (okusan_cached_pwr_dead || ce_st == OKUSAN_PIN_OPEN || na13 == OKUSAN_PIN_OPEN ||
+	uint8_t ce_st   = okusan_cart_rt.cached_pins[OKUSAN_PIN_CIRAM_CE] & 0x0Fu;
+	uint8_t na13_st = okusan_cart_rt.cached_pins[OKUSAN_PIN_PPU_NA13] & 0x0Fu;
+	int open_bus_nt = (okusan_cart_rt.power_dead || ce_st == OKUSAN_PIN_OPEN || na13_st == OKUSAN_PIN_OPEN ||
 	                   ((ce_st == OKUSAN_PIN_MARGINAL || ce_st == OKUSAN_PIN_WEAK ||
-	                     na13 == OKUSAN_PIN_MARGINAL || na13 == OKUSAN_PIN_WEAK) &&
+	                     na13_st == OKUSAN_PIN_MARGINAL || na13_st == OKUSAN_PIN_WEAK) &&
 	                    ((off + okusan_pin_chatter(239u)) & 255u) < 42u));
-	if (do_tr) {
-		okusan_trace_pin_bit(PIN_CIRAM_CE, 0u, open_bus_nt ? 1u : 0u,
+	if (sample_trace) {
+		okusan_trace_pin_bit(OKUSAN_PIN_CIRAM_CE, 0u, open_bus_nt ? 1u : 0u,
 		                     (uint16_t)(0x2000u | off),
 		                     open_bus_nt ? (uint16_t)(off & 0xFFu) : (uint16_t)(0x2000u | off));
 		okusan_trace_ppu_addr_pins(0x2000u | off, 0x2000u | off);
@@ -841,160 +226,132 @@ static INLINE uint8_t okusan_read_nt_byte(const uint8_t *nt_page, uint32_t off) 
 
 static INLINE uint32_t okusan_map_chr_addr(uint32_t vadr, int plane) {
 	(void)plane;
-	uint32_t a = vadr & 0x1FFFu;
-	uint32_t do_tr = ((++okusan_ppu_trace_div & 31u) == 0u);
+	uint32_t chr_addr = vadr & 0x1FFFu;
+	uint32_t sample_trace = ((++okusan_ppu_trace_div & 31u) == 0u);
 	if (!okusan_cart_is_active()) {
-		if (do_tr) okusan_trace_ppu_addr_pins(a, a);
-		return a;
+		if (sample_trace) okusan_trace_ppu_addr_pins(chr_addr, chr_addr);
+		return chr_addr;
 	}
-	if (okusan_cached_pwr_dead) {
-		if (do_tr) okusan_trace_ppu_addr_pins(a, 0x3FFFu);
+	if (okusan_cart_rt.power_dead) {
+		if (sample_trace) okusan_trace_ppu_addr_pins(chr_addr, 0x3FFFu);
 		return 0x1FFFu;
 	}
 
 	static const int ppu_addr_pin[14] = {
-		PIN_PPU_A0, PIN_PPU_A1, PIN_PPU_A2,  PIN_PPU_A3,  PIN_PPU_A4,  PIN_PPU_A5,  PIN_PPU_A6,
-		PIN_PPU_A7, PIN_PPU_A8, PIN_PPU_A9,  PIN_PPU_A10, PIN_PPU_A11, PIN_PPU_A12, PIN_PPU_A13
+		OKUSAN_PIN_PPU_A0, OKUSAN_PIN_PPU_A1, OKUSAN_PIN_PPU_A2,  OKUSAN_PIN_PPU_A3,  OKUSAN_PIN_PPU_A4,  OKUSAN_PIN_PPU_A5,  OKUSAN_PIN_PPU_A6,
+		OKUSAN_PIN_PPU_A7, OKUSAN_PIN_PPU_A8, OKUSAN_PIN_PPU_A9,  OKUSAN_PIN_PPU_A10, OKUSAN_PIN_PPU_A11, OKUSAN_PIN_PPU_A12, OKUSAN_PIN_PPU_A13
 	};
-	static const int xtalk_l_bit[14] = {
-		 1,  2,  3,  4,  5,  6, -1,
-		-1,  7,  8,  9, 10, 11, 12
-	};
-	static const int xtalk_r_bit[14] = {
-		-1,  0,  1,  2,  3,  4,  5,
-		 8,  9, 10, 11, 12, 13, -1
-	};
+	static const int xtalk_left_bit[14]  = {  1,  2,  3,  4,  5,  6, -1, -1,  7,  8,  9, 10, 11, 12 };
+	static const int xtalk_right_bit[14] = { -1,  0,  1,  2,  3,  4,  5,  8,  9, 10, 11, 12, 13, -1 };
 
-	uint32_t prev = okusan_last_ppu_addr;
-	uint32_t full = vadr & 0x3FFFu;
-	uint32_t bh = (full ^ (full >> 6)) & 255u;
-	uint32_t out  = 0u;
-	for (int b = 0; b < 13; ++b) {
-		uint32_t vb = (full >> b) & 1u;
-		uint32_t pb = (prev >> b) & 1u;
-		uint32_t xl = (xtalk_l_bit[b] >= 0) ? ((full >> xtalk_l_bit[b]) & 1u) : ((okusan_last_ppu_data >> 7) & 1u);
-		uint32_t xr = (xtalk_r_bit[b] >= 0) ? ((full >> xtalk_r_bit[b]) & 1u) : (okusan_last_ppu_data & 1u);
-		uint32_t rb = okusan_pin_xfer_bit(ppu_addr_pin[b], vb, pb, xl, xr, 1u, bh + (uint32_t)b * 11u, 1);
-		out |= (rb << b);
+	uint32_t prev_addr = okusan_last_ppu_addr;
+	uint32_t full_addr = vadr & 0x3FFFu;
+	uint32_t bus_hash  = (full_addr ^ (full_addr >> 6)) & 255u;
+	uint32_t mapped    = 0u;
+	for (int bit = 0; bit < 13; ++bit) {
+		uint32_t orig_bit = (full_addr >> bit) & 1u;
+		uint32_t prev_bit = (prev_addr >> bit) & 1u;
+		uint32_t xl = (xtalk_left_bit[bit]  >= 0) ? ((full_addr >> xtalk_left_bit[bit])  & 1u) : ((okusan_last_ppu_data >> 7) & 1u);
+		uint32_t xr = (xtalk_right_bit[bit] >= 0) ? ((full_addr >> xtalk_right_bit[bit]) & 1u) : (okusan_last_ppu_data & 1u);
+		uint32_t eff_bit = okusan_pin_xfer_bit(ppu_addr_pin[bit], orig_bit, prev_bit, xl, xr, 1u,
+		                                       bus_hash + (uint32_t)bit * 11u, 1);
+		mapped |= (eff_bit << bit);
 	}
-	okusan_last_ppu_addr = full;
-	if (do_tr) {
-		uint32_t a13_e = ((okusan_cached_pins[PIN_PPU_A13] & 0x0Fu) == OKUSAN_PIN_OPEN) ? 1u : 0u;
-		okusan_trace_ppu_addr_pins(full, (out & 0x1FFFu) | (a13_e << 13));
+	okusan_last_ppu_addr = full_addr;
+	if (sample_trace) {
+		uint32_t a13_eff = ((okusan_cart_rt.cached_pins[OKUSAN_PIN_PPU_A13] & 0x0Fu) == OKUSAN_PIN_OPEN) ? 1u : 0u;
+		okusan_trace_ppu_addr_pins(full_addr, (mapped & 0x1FFFu) | (a13_eff << 13));
 	}
-	return out & 0x1FFFu;
+	return mapped & 0x1FFFu;
 }
 
 static INLINE uint8_t okusan_map_ppu_data_bus(uint8_t val, uint8_t open_bus, uint32_t vadr) {
 	(void)open_bus;
 	static const int ppu_data_pin[8] = {
-		PIN_PPU_D0, PIN_PPU_D1, PIN_PPU_D2, PIN_PPU_D3,
-		PIN_PPU_D4, PIN_PPU_D5, PIN_PPU_D6, PIN_PPU_D7
+		OKUSAN_PIN_PPU_D0, OKUSAN_PIN_PPU_D1, OKUSAN_PIN_PPU_D2, OKUSAN_PIN_PPU_D3,
+		OKUSAN_PIN_PPU_D4, OKUSAN_PIN_PPU_D5, OKUSAN_PIN_PPU_D6, OKUSAN_PIN_PPU_D7
 	};
-	uint32_t prev = okusan_last_ppu_data;
-	uint32_t bh = (vadr ^ ((uint32_t)val << 2)) & 255u;
-	uint32_t out = 0u;
-	for (int b = 0; b < 8; ++b) {
-		uint32_t vb = ((uint32_t)val >> b) & 1u;
-		uint32_t pb = (prev >> b) & 1u;
+	uint32_t prev_data = okusan_last_ppu_data;
+	uint32_t bus_hash  = (vadr ^ ((uint32_t)val << 2)) & 255u;
+	uint32_t mapped    = 0u;
+	for (int bit = 0; bit < 8; ++bit) {
+		uint32_t orig_bit = ((uint32_t)val >> bit) & 1u;
+		uint32_t prev_bit = (prev_data >> bit) & 1u;
 		uint32_t xl, xr;
-		if (b < 4) {
-			/* Pin layout Front 25..30: PA0, PD0, PD1, PD2, PD3, +5V -> PD0's left neighbor PA0 toggles with Y; hold steady pull-up bit cleanly */
-			xl = (b > 0) ? (((uint32_t)val >> (b - 1)) & 1u) : vb;
-			xr = (b < 3) ? (((uint32_t)val >> (b + 1)) & 1u) : 1u;
+		if (bit < 4) {
+			/* Front 25..30 order: PA0, PD0, PD1, PD2, PD3, +5V -> isolate PD0 from fast Y-row PA0 chatter */
+			xl = (bit > 0) ? (((uint32_t)val >> (bit - 1)) & 1u) : orig_bit;
+			xr = (bit < 3) ? (((uint32_t)val >> (bit + 1)) & 1u) : 1u;
 		} else {
-			/* Pin layout Back 56..60: PA13, PD7, PD6, PD5, PD4 */
-			xl = (b < 7) ? (((uint32_t)val >> (b + 1)) & 1u) : vb;
-			xr = (b > 4) ? (((uint32_t)val >> (b - 1)) & 1u) : 1u;
+			/* Back 56..60 order: PA13, PD7, PD6, PD5, PD4 */
+			xl = (bit < 7) ? (((uint32_t)val >> (bit + 1)) & 1u) : orig_bit;
+			xr = (bit > 4) ? (((uint32_t)val >> (bit - 1)) & 1u) : 1u;
 		}
-		/* An open individual PPU data pin floats to CMOS/NMOS pull-up (1) rather than lower scanline address Y,
-		 * producing authentic crisp 8px-periodic vertical stripes/jailbars when a data line drops. */
-		uint32_t rb = okusan_pin_xfer_bit(ppu_data_pin[b], vb, pb, xl, xr, 1u, bh + (uint32_t)b * 17u, 1);
-		out |= (rb << b);
+		/* Isolated open PPU D0..D7 floats to steady HIGH pull-up, producing classic 8px vertical jailbars. */
+		uint32_t eff_bit = okusan_pin_xfer_bit(ppu_data_pin[bit], orig_bit, prev_bit, xl, xr, 1u,
+		                                       bus_hash + (uint32_t)bit * 17u, 1);
+		mapped |= (eff_bit << bit);
 	}
 	okusan_last_ppu_data = val;
-	return (uint8_t)out;
+	return (uint8_t)mapped;
 }
 
 static INLINE uint8_t okusan_map_chr_data(uint8_t val, int plane, uint32_t vadr) {
 	(void)plane;
-	uint32_t do_tr = ((okusan_ppu_trace_div & 31u) == 0u);
+	uint32_t sample_trace = ((okusan_ppu_trace_div & 31u) == 0u);
 	if (!okusan_cart_is_active()) {
-		if (do_tr) okusan_trace_ppu_data_pins(val, val);
+		if (sample_trace) okusan_trace_ppu_data_pins(val, val);
 		return val;
 	}
 
-	/* True 2C02 multiplexed AD0..AD7 bus: lower address byte remains on bus capacitance if CHR ignores OE */
+	/* Real 2C02 multiplexed AD0..AD7 bus holds lower address byte when CHR output stays disabled */
 	uint8_t open_bus = (uint8_t)(vadr & 0xFFu);
-	if (okusan_cached_pwr_dead ||
-	    okusan_ctrl_pin_dropped(PIN_PPU_RD, 73u, 110u) ||
-	    okusan_ctrl_pin_dropped(PIN_PPU_A13, 79u, 90u)) {
-		if (do_tr) okusan_trace_ppu_data_pins(val, open_bus);
+	if (okusan_cart_rt.power_dead ||
+	    okusan_ctrl_pin_dropped(OKUSAN_PIN_PPU_RD,  73u, 110u) ||
+	    okusan_ctrl_pin_dropped(OKUSAN_PIN_PPU_A13, 79u,  90u)) {
+		if (sample_trace) okusan_trace_ppu_data_pins(val, open_bus);
 		return open_bus;
 	}
 
 	uint8_t eff = okusan_map_ppu_data_bus(val, open_bus, vadr);
-	if (do_tr) okusan_trace_ppu_data_pins(val, eff);
+	if (sample_trace) okusan_trace_ppu_data_pins(val, eff);
 	return eff;
 }
 
-/* Real HVC-001 transient CIRAM (/WE, /CE, A10, AD0..AD7) write-latching when snapping back to seated via '?' ('/').
- * While adjusting angles (< > [ ]), CIRAM is untouched; only snapping from a faulted powered state via '?'
- * latches bus-derived corruption into internal 2KB CIRAM (vnapage) so that screen stays broken until overwritten. */
-__attribute__((visibility("default")))
-void okusan_reseat_cart_contact(void) {
-	int was_faulted = okusan_cart_is_active();
-	if (was_faulted && !okusan_cached_pwr_dead && !ppudead && (ScreenON || SpriteON)) {
-		int ciram_sev = (int)(okusan_cached_pins[PIN_PPU_WR]    & 0x0Fu)
-		              + (int)(okusan_cached_pins[PIN_CIRAM_CE]  & 0x0Fu)
-		              + (int)(okusan_cached_pins[PIN_PPU_NA13]  & 0x0Fu)
-		              + (int)(okusan_cached_pins[PIN_CIRAM_A10] & 0x0Fu);
-		int ppu_faults = 0;
-		for (int p = PIN_PPU_RD; p <= PIN_VCC_R; ++p) {
-			if ((okusan_cached_pins[p] & 0x0Fu) != OKUSAN_PIN_SEATED) ppu_faults++;
-		}
-		for (int p = PIN_PPU_WR; p <= PIN_PPU_D4; ++p) {
-			if ((okusan_cached_pins[p] & 0x0Fu) != OKUSAN_PIN_SEATED) ppu_faults++;
-		}
-		if ((okusan_cached_pins[PIN_GND1]  & 0x0Fu) != OKUSAN_PIN_SEATED) ppu_faults++;
-		if ((okusan_cached_pins[PIN_GND2]  & 0x0Fu) != OKUSAN_PIN_SEATED) ppu_faults++;
-		if ((okusan_cached_pins[PIN_VCC_L] & 0x0Fu) != OKUSAN_PIN_SEATED) ppu_faults++;
+void okusan_ppu_on_reseat_latch(int ciram_severity, int ppu_fault_count,
+                                int tilt, int lift, int pitch, uint32_t frame_tick) {
+	if (ppudead || (!ScreenON && !SpriteON)) return;
+	if (ciram_severity <= 0 && ppu_fault_count < 4) return;
 
-		if (ciram_sev > 0 || ppu_faults >= 4) {
-			int burst = 8 + ciram_sev * 2 + (ppu_faults / 2);
-			if (burst > 28) burst = 28;
-			uint32_t rng = (okusan_frame_tick * 747796405u)
-			             ^ ((uint32_t)(okusan_tilt + 64) * 2891336453u)
-			             ^ ((uint32_t)(okusan_lift + 16) * 277803737u)
-			             ^ ((uint32_t)(okusan_pitch + 16) * 1597334677u);
-			for (int b = 0; b < burst; ++b) {
-				rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-				int nt = (int)(rng & 3u);
-				if (!(PPUNTARAM & (1 << nt)) || !vnapage[nt]) continue;
-				uint32_t base_off = (rng >> 8) & 0x3FFu;
-				uint32_t mode = (rng >> 20) & 3u;
-				uint32_t run = (base_off < 0x3C0u) ? (1u + ((rng >> 24) & 3u)) : 1u;
-				for (uint32_t k = 0; k < run; ++k) {
-					uint32_t off = (base_off + k) & 0x3FFu;
-					uint8_t cur = vnapage[nt][off];
-					uint8_t val = cur;
-					if (mode < 2u) {
-						val = okusan_map_ppu_data_bus(cur, (uint8_t)(off & 0xFFu), 0x2000u | off);
-						if (val == cur) val = (uint8_t)(cur ^ ((rng >> 16) & 0xFFu));
-					} else if (mode == 2u) {
-						uint32_t alias = 0x20u << ((rng >> 22) & 2u);
-						val = vnapage[nt][off ^ alias];
-					} else {
-						val = (uint8_t)((off & 0xFFu) ^ (okusan_last_ppu_data & 0x0Fu));
-					}
-					vnapage[nt][off] = val;
-				}
+	int burst = 8 + ciram_severity * 2 + (ppu_fault_count / 2);
+	if (burst > 28) burst = 28;
+	uint32_t rng = (frame_tick * 747796405u)
+	             ^ ((uint32_t)(tilt + 64) * 2891336453u)
+	             ^ ((uint32_t)(lift + 16) * 277803737u)
+	             ^ ((uint32_t)(pitch + 16) * 1597334677u);
+	for (int b = 0; b < burst; ++b) {
+		rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+		int nt = (int)(rng & 3u);
+		if (!(PPUNTARAM & (1 << nt)) || !vnapage[nt]) continue;
+		uint32_t base_off = (rng >> 8) & 0x3FFu;
+		uint32_t mode     = (rng >> 20) & 3u;
+		uint32_t run      = (base_off < 0x3C0u) ? (1u + ((rng >> 24) & 3u)) : 1u;
+		for (uint32_t k = 0; k < run; ++k) {
+			uint32_t off = (base_off + k) & 0x3FFu;
+			uint8_t  cur = vnapage[nt][off];
+			uint8_t  val = cur;
+			if (mode < 2u) {
+				val = okusan_map_ppu_data_bus(cur, (uint8_t)(off & 0xFFu), 0x2000u | off);
+				if (val == cur) val = (uint8_t)(cur ^ ((rng >> 16) & 0xFFu));
+			} else if (mode == 2u) {
+				uint32_t alias = 0x20u << ((rng >> 22) & 2u);
+				val = vnapage[nt][off ^ alias];
+			} else {
+				val = (uint8_t)((off & 0xFFu) ^ (okusan_last_ppu_data & 0x0Fu));
 			}
+			vnapage[nt][off] = val;
 		}
 	}
-	okusan_pin_weak_mask = 0ULL;
-	okusan_pin_open_mask = 0ULL;
-	okusan_set_cart_contact3(0, 0, 0);
 }
 
 /* Sprite 0 on the current line, until its hit is found (0x100: none). */
@@ -1192,18 +549,18 @@ static DECLFW(B2007) {
 			uint8_t wr_val = V;
 			uint32_t wr_addr = tmp;
 			if (okusan_cart_is_active()) {
-				if (okusan_cached_pwr_dead ||
-				    okusan_ctrl_pin_dropped(PIN_PPU_WR,  163u, 110u) ||
-				    okusan_ctrl_pin_dropped(PIN_PPU_A13, 167u, 90u)) {
+				if (okusan_cart_rt.power_dead ||
+				    okusan_ctrl_pin_dropped(OKUSAN_PIN_PPU_WR,  163u, 110u) ||
+				    okusan_ctrl_pin_dropped(OKUSAN_PIN_PPU_A13, 167u,  90u)) {
 					wr_ok = 0;
 				} else {
 					wr_addr = okusan_map_chr_addr(tmp, (tmp >> 3) & 1);
 					wr_val  = okusan_map_ppu_data_bus(V, V, wr_addr);
 				}
-				okusan_trace_pin_bit(PIN_PPU_WR, 0u, wr_ok ? 0u : 1u, (uint16_t)tmp, (uint16_t)wr_addr);
+				okusan_trace_pin_bit(OKUSAN_PIN_PPU_WR, 0u, wr_ok ? 0u : 1u, (uint16_t)tmp, (uint16_t)wr_addr);
 				okusan_trace_ppu_data_pins(V, wr_ok ? wr_val : (uint8_t)(tmp & 0xFFu));
 			} else {
-				okusan_trace_pin_bit(PIN_PPU_WR, 0u, 0u, (uint16_t)tmp, (uint16_t)tmp);
+				okusan_trace_pin_bit(OKUSAN_PIN_PPU_WR, 0u, 0u, (uint16_t)tmp, (uint16_t)tmp);
 			}
 			if (wr_ok && (PPUCHRRAM & (1 << (wr_addr >> 10))))
 				VPage[wr_addr >> 10][wr_addr] = wr_val;
@@ -1213,20 +570,20 @@ static DECLFW(B2007) {
 		uint32_t off = tmp & 0x3FF;
 		uint8_t wr_ok = 1;
 		if (okusan_cart_is_active()) {
-			uint8_t wr_st   = okusan_cached_pins[PIN_PPU_WR]   & 0x0Fu;
-			uint8_t ce_st   = okusan_cached_pins[PIN_CIRAM_CE] & 0x0Fu;
-			uint8_t na13_st = okusan_cached_pins[PIN_PPU_NA13] & 0x0Fu;
-			if (okusan_cached_pwr_dead || wr_st == OKUSAN_PIN_OPEN ||
+			uint8_t wr_st   = okusan_cart_rt.cached_pins[OKUSAN_PIN_PPU_WR]   & 0x0Fu;
+			uint8_t ce_st   = okusan_cart_rt.cached_pins[OKUSAN_PIN_CIRAM_CE] & 0x0Fu;
+			uint8_t na13_st = okusan_cart_rt.cached_pins[OKUSAN_PIN_PPU_NA13] & 0x0Fu;
+			if (okusan_cart_rt.power_dead || wr_st == OKUSAN_PIN_OPEN ||
 			    ce_st == OKUSAN_PIN_OPEN || na13_st == OKUSAN_PIN_OPEN) {
 				wr_ok = 0;
 			} else {
 				ntIdx = okusan_map_nt(ntIdx);
 			}
-			okusan_trace_pin_bit(PIN_PPU_WR, 0u, wr_ok ? 0u : 1u, (uint16_t)tmp, (uint16_t)((ntIdx << 10) | off));
-			okusan_trace_pin_bit(PIN_CIRAM_CE, 0u, (ce_st == OKUSAN_PIN_OPEN || na13_st == OKUSAN_PIN_OPEN) ? 1u : 0u,
+			okusan_trace_pin_bit(OKUSAN_PIN_PPU_WR, 0u, wr_ok ? 0u : 1u, (uint16_t)tmp, (uint16_t)((ntIdx << 10) | off));
+			okusan_trace_pin_bit(OKUSAN_PIN_CIRAM_CE, 0u, (ce_st == OKUSAN_PIN_OPEN || na13_st == OKUSAN_PIN_OPEN) ? 1u : 0u,
 			                     (uint16_t)tmp, (uint16_t)off);
 		} else {
-			okusan_trace_pin_bit(PIN_PPU_WR, 0u, 0u, (uint16_t)tmp, (uint16_t)tmp);
+			okusan_trace_pin_bit(OKUSAN_PIN_PPU_WR, 0u, 0u, (uint16_t)tmp, (uint16_t)tmp);
 		}
 		if (wr_ok && (PPUNTARAM & (1 << ntIdx)))
 			vnapage[ntIdx][off] = V;
@@ -2159,9 +1516,7 @@ void FCEUPPU_Power(void) {
 
 
 int FCEUPPU_Loop(int skip) {
-	okusan_finalize_frame_telemetry();
-	okusan_frame_tick++;
-	okusan_refresh_frame_cache();
+	okusan_begin_ppu_frame();
 	/* Needed for Knight Rider, possibly others. */
 	if (ppudead) {
 		memset(XBuf, 0x80, 256 * 240);
