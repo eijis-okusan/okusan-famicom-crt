@@ -2,69 +2,24 @@
 #import "app/AppLocalization.hpp"
 #import "app/AppMenuController.hpp"
 #import "app/AppPreferences.hpp"
+#import "app/EmulationPacer.hpp"
 #import "app/LicensesWindow.hpp"
 
 #import <Carbon/Carbon.h>
 #import <GameController/GameController.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-#include <mach/mach_time.h>
 
 #include "audio/MacAudioEngine.hpp"
 #include "core/CartridgeFaultInjector.hpp"
 #include "core/FamicomCore.hpp"
 #include "input/ControllerSettingsWindow.hpp"
 #include "input/InputBindings.hpp"
+#include "input/InputPoller.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <string>
-
-namespace {
-
-enum RetroJoypadBit : unsigned {
-    JOYPAD_B      = 0,
-    JOYPAD_SELECT = 2,
-    JOYPAD_START  = 3,
-    JOYPAD_UP     = 4,
-    JOYPAD_DOWN   = 5,
-    JOYPAD_LEFT   = 6,
-    JOYPAD_RIGHT  = 7,
-    JOYPAD_A      = 8,
-};
-
-uint64_t monotonicNowNs() {
-    static mach_timebase_info_data_t timebase{};
-    if (timebase.denom == 0) mach_timebase_info(&timebase);
-    return (mach_absolute_time() * timebase.numer) / timebase.denom;
-}
-
-bool isBindingDown(const KeyBindingGroup &group, const std::array<bool, 256> &pressedKeys) {
-    return (group.primary < pressedKeys.size() && pressedKeys[group.primary]) ||
-           (group.alt1    < pressedKeys.size() && pressedKeys[group.alt1])    ||
-           (group.alt2    < pressedKeys.size() && pressedKeys[group.alt2]);
-}
-
-// Match cartridge contact keys by character when possible so both US ANSI and Japanese JIS
-// keyboards work intuitively (e.g., JIS '@' sits at kVK_ANSI_LeftBracket, and ']' sits at Backslash).
-bool isContactFaultBootShortcut(NSEvent *event) {
-    NSString *chars = event.characters ?: @"";
-    NSString *charsIgn = event.charactersIgnoringModifiers ?: @"";
-    return [chars isEqualToString:@"@"] || [charsIgn isEqualToString:@"@"];
-}
-
-bool isCartridgeContactShortcut(NSEvent *event) {
-    NSString *charsIgn = event.charactersIgnoringModifiers ?: @"";
-    return event.keyCode == kVK_ANSI_Comma ||
-           event.keyCode == kVK_ANSI_Period ||
-           event.keyCode == kVK_ANSI_Slash ||
-           [charsIgn isEqualToString:@"["] ||
-           [charsIgn isEqualToString:@"]"] ||
-           [charsIgn isEqualToString:@"\\"] ||
-           [charsIgn isEqualToString:@"¥"];
-}
-
-} // namespace
 
 @implementation AppDelegate {
     NSWindow *_window;
@@ -74,9 +29,9 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     double _audioSampleRate;
     BOOL _audioStarted;
 
-    NSTimer *_frameTimer;
-    uint64_t _nextFrameDeadlineNs;
+    EmulationPacer *_pacer;
     std::array<bool, 256> _pressedKeys;
+    famicom_input::GamepadHotkeyState _gamepadHotkeys;
 
     BOOL _paused;
     BOOL _frozen;
@@ -85,11 +40,10 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     int _cartTilt;
     int _cartLift;
     int _cartPitch;
-    BOOL _prevGamepadL2;
-    BOOL _prevGamepadR2;
 
     NSString *_loadedRomPath;
     NSString *_pendingRomPath;
+    NSString *_activeFdsDiskPath;
     NSMutableArray<NSString *> *_recentRoms;
 
     AppMenuController *_menuController;
@@ -98,13 +52,24 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     LicensesWindowController *_licensesController;
 }
 
+static bool isSupportedRomOrBiosPath(NSString *path) {
+    NSString *ext = [path.pathExtension lowercaseString];
+    return [ext isEqualToString:@"nes"] ||
+           [ext isEqualToString:@"fds"] ||
+           [ext isEqualToString:@"rom"] ||
+           [ext isEqualToString:@"bin"];
+}
+
 #pragma mark - Preferences & Menu Sync
 
 - (void)loadUserPreferences {
     CrtDisplayConfig config = _screenView.displayConfig;
     bool muted = false;
-    app_prefs::loadDisplayPreferences(config, muted);
+    bool invert3d = false;
+    app_prefs::loadDisplayPreferences(config, muted, invert3d);
     _screenView.displayConfig = config;
+    _screenView.view3dMode = Famicom3dViewMode::NakedCrt;
+    _screenView.invert3dEyes = invert3d ? YES : NO;
     _audioEngine.setRfTvMode(config.rfMode, config.rfSnow, config.rfSignal);
     _audioEngine.setMuted(muted);
 
@@ -122,20 +87,85 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 }
 
 - (void)refreshMenuStates {
+    const FdsDriveStatus fdsStatus = _famicom.fdsDriveStatus();
     [_menuController refreshStatesWithDisplayConfig:_screenView.displayConfig
                                               muted:(_audioEngine.isMuted() ? YES : NO)
                                              paused:_paused
                                              frozen:_frozen
+                                         coreLoaded:(_famicom.isLoaded() ? YES : NO)
                                      consolePowered:(_famicom.isLoaded() && _screenView.consolePowered)
-                                      inputBindings:_bindings];
+                                      inputBindings:_bindings
+                                       threeDActive:(_famicom.is3dSystemActive() ? YES : NO)
+                                         view3dMode:_screenView.view3dMode
+                                       invert3dEyes:_screenView.invert3dEyes
+                                          fdsStatus:fdsStatus];
 }
 
-#pragma mark - ROM Loading & Actions
+#pragma mark - ROM & FDS Disk Loading
+
+- (void)saveCurrentFdsDiskDiff {
+    if (_famicom.isLoaded() && _famicom.isFdsActive() && _activeFdsDiskPath.length > 0) {
+        _famicom.saveFdsDiskDiff(app_prefs::fdsSaveDiffPathForDisk(_activeFdsDiskPath));
+    }
+}
+
+- (BOOL)hotSwapFdsDiskPath:(NSString *)diskPath showErrorAlert:(BOOL)showAlert {
+    if (!_famicom.isLoaded() || !_famicom.isFdsActive() || !diskPath) return NO;
+    [self saveCurrentFdsDiskDiff];
+    const int sides = _famicom.hotSwapFdsDisk([diskPath UTF8String]);
+    if (sides <= 0) {
+        if (showAlert) {
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = app_l10n::tr(@"FDS ディスクを読み込めませんでした", @"Failed to Load FDS Disk");
+            alert.informativeText = diskPath;
+            [alert runModal];
+        }
+        return NO;
+    }
+    _activeFdsDiskPath = [diskPath copy];
+    _loadedRomPath = [diskPath copy];
+    app_prefs::recordRecentRomPath(_recentRoms, diskPath);
+    [_menuController rebuildHistoryMenuWithPaths:_recentRoms activePath:_loadedRomPath target:self];
+    _famicom.loadFdsDiskDiff(app_prefs::fdsSaveDiffPathForDisk(_activeFdsDiskPath));
+    [self refreshMenuStates];
+    NSString *baseName = [[diskPath lastPathComponent] stringByDeletingPathExtension];
+    [_screenView showStatusBannerText:app_l10n::tr(
+        [NSString stringWithFormat:@"ディスク挿入: %@ (%d面)", baseName, sides],
+        [NSString stringWithFormat:@"Disk Inserted: %@ (%d sides)", baseName, sides])];
+    return YES;
+}
 
 - (BOOL)loadAndPowerOnRom:(NSString *)romPath {
     if (!romPath || ![[NSFileManager defaultManager] fileExistsAtPath:romPath]) {
         return NO;
     }
+
+    NSString *ext = [romPath.pathExtension lowercaseString];
+    if ([ext isEqualToString:@"fds"]) {
+        // Hot-swap cleanly onto a running FDS BIOS standby without cold resetting.
+        if (_famicom.isLoaded() && _famicom.isFdsActive()) {
+            const FdsDriveStatus fst = _famicom.fdsDriveStatus();
+            if (fst.totalSides == 0) {
+                return [self hotSwapFdsDiskPath:romPath showErrorAlert:YES];
+            }
+        }
+        const std::string biosPath = app_prefs::applicationSupportDirectory() + "/disksys.rom";
+        if (![[NSFileManager defaultManager] fileExistsAtPath:[NSString stringWithUTF8String:biosPath.c_str()]]) {
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = app_l10n::tr(
+                @"FDS BIOS (disksys.rom) が見つかりません",
+                @"FDS BIOS (disksys.rom) Not Found");
+            alert.informativeText = app_l10n::tr(
+                @"先に FDS BIOS (disksys.rom / .rom / .bin / .nes) を開くと自動登録され、そのまま .fds を入れ替えられます。",
+                @"Open your FDS BIOS file (disksys.rom / .rom / .bin / .nes) first to register it automatically, then load or drop a .fds image.");
+            [alert runModal];
+            return NO;
+        }
+    }
+
+    [self saveCurrentFdsDiskDiff];
+    _activeFdsDiskPath = nil;
+    app_prefs::cacheFdsBiosIfValid(romPath);
 
     NSString *corePath = [[[NSBundle mainBundle] privateFrameworksPath]
                           stringByAppendingPathComponent:@"fceumm_libretro.dylib"];
@@ -143,7 +173,7 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 
     if (!corePath || !_famicom.load([corePath UTF8String], [romPath UTF8String], supportDir, supportDir)) {
         NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText = app_l10n::tr(@"NES ROM を読み込めませんでした", @"Failed to Load NES ROM");
+        alert.messageText = app_l10n::tr(@"ROM / ディスクを読み込めませんでした", @"Failed to Load ROM / Disk Image");
         alert.informativeText = romPath;
         [alert runModal];
 
@@ -154,6 +184,10 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     }
 
     _loadedRomPath = [romPath copy];
+    if ([ext isEqualToString:@"fds"]) {
+        _activeFdsDiskPath = [romPath copy];
+        _famicom.loadFdsDiskDiff(app_prefs::fdsSaveDiffPathForDisk(_activeFdsDiskPath));
+    }
     app_prefs::recordRecentRomPath(_recentRoms, romPath);
     [_menuController rebuildHistoryMenuWithPaths:_recentRoms activePath:_loadedRomPath target:self];
 
@@ -168,6 +202,7 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     _audioEngine.setFrozen(false);
     _audioEngine.setResetHeld(false);
     [_screenView setFreezeEffect:FreezeStyle::CleanTone seed:0 active:NO];
+    _screenView.view3dMode = Famicom3dViewMode::NakedCrt;
 
     if (_audioStarted && std::abs(_famicom.sampleRate() - _audioSampleRate) > 1.0) {
         _audioSampleRate = _famicom.sampleRate();
@@ -214,8 +249,12 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     panel.canChooseDirectories = NO;
     panel.allowsMultipleSelection = NO;
     if (@available(macOS 11.0, *)) {
-        UTType *nesType = [UTType typeWithFilenameExtension:@"nes"];
-        if (nesType) panel.allowedContentTypes = @[nesType];
+        NSMutableArray<UTType *> *types = [NSMutableArray array];
+        for (NSString *ext in @[@"nes", @"fds", @"rom", @"bin"]) {
+            UTType *t = [UTType typeWithFilenameExtension:ext];
+            if (t) [types addObject:t];
+        }
+        if (types.count > 0) panel.allowedContentTypes = types;
     }
     if ([panel runModal] == NSModalResponseOK && panel.URL.isFileURL) {
         [self loadAndPowerOnRom:panel.URL.path];
@@ -227,7 +266,7 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     mutator(config);
     _screenView.displayConfig = config;
     _audioEngine.setRfTvMode(config.rfMode, config.rfSnow, config.rfSignal);
-    app_prefs::saveDisplayPreferences(config, _audioEngine.isMuted());
+    app_prefs::saveDisplayPreferences(config, _audioEngine.isMuted(), _screenView.invert3dEyes == YES);
     [self refreshMenuStates];
     [_screenView requestRedraw];
 }
@@ -251,6 +290,7 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 
 - (void)triggerConsoleReset {
     if (_famicom.isLoaded() && _screenView.consolePowered) {
+        _famicom.clearFdsFault();
         _famicom.reset();
         [_screenView triggerResetGlitch];
     }
@@ -285,12 +325,120 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 
 - (void)toggleMute:(id)sender {
     _audioEngine.setMuted(!_audioEngine.isMuted());
-    app_prefs::saveDisplayPreferences(_screenView.displayConfig, _audioEngine.isMuted());
+    app_prefs::saveDisplayPreferences(_screenView.displayConfig, _audioEngine.isMuted(), _screenView.invert3dEyes == YES);
     [self refreshMenuStates];
 }
 
 - (void)toggleFullScreen:(id)sender {
     [_window toggleFullScreen:nil];
+}
+
+#pragma mark - Famicom 3D System
+
+- (void)select3dModeFromMenu:(NSMenuItem *)sender {
+    const int tag = static_cast<int>(sender.tag);
+    if (tag < 0 || tag > 3) return;
+    _screenView.view3dMode = static_cast<Famicom3dViewMode>(tag);
+    [self refreshMenuStates];
+    [_screenView show3dModeBanner];
+}
+
+- (void)cycle3dViewMode {
+    const int cur = static_cast<int>(_screenView.view3dMode);
+    _screenView.view3dMode = static_cast<Famicom3dViewMode>((cur + 1) % 4);
+    [self refreshMenuStates];
+    [_screenView show3dModeBanner];
+}
+
+- (void)toggleInvert3dEyes:(id)sender {
+    (void)sender;
+    _screenView.invert3dEyes = !_screenView.invert3dEyes;
+    app_prefs::saveDisplayPreferences(_screenView.displayConfig, _audioEngine.isMuted(), _screenView.invert3dEyes == YES);
+    [self refreshMenuStates];
+    [_screenView show3dModeBanner];
+}
+
+#pragma mark - Famicom Disk System
+
++ (NSString *)labelForFdsSide:(int)side totalSides:(int)totalSides {
+    if (totalSides <= 2) {
+        return app_l10n::tr((side == 0) ? @"A面" : @"B面", (side == 0) ? @"Side A" : @"Side B");
+    }
+    const int diskNo = 1 + (side / 2);
+    const char sideCh = (side & 1) ? 'B' : 'A';
+    return app_l10n::tr(
+        [NSString stringWithFormat:@"Disk %d %c面", diskNo, sideCh],
+        [NSString stringWithFormat:@"Disk %d Side %c", diskNo, sideCh]);
+}
+
+- (void)openFdsHotSwapDialog:(id)sender {
+    (void)sender;
+    if (!_famicom.isLoaded() || !_famicom.isFdsActive()) return;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    if (@available(macOS 11.0, *)) {
+        UTType *fdsType = [UTType typeWithFilenameExtension:@"fds"];
+        if (fdsType) panel.allowedContentTypes = @[fdsType];
+    }
+    if ([panel runModal] == NSModalResponseOK && panel.URL.isFileURL) {
+        [self hotSwapFdsDiskPath:panel.URL.path showErrorAlert:YES];
+    }
+}
+
+- (void)flipFdsDisk:(id)sender {
+    (void)sender;
+    if (!_famicom.isLoaded() || !_famicom.isFdsActive()) return;
+    const FdsDriveStatus fst = _famicom.fdsDriveStatus();
+    if (fst.insertedSide < 0 || fst.totalSides < 2) return;
+    int nextSide = (fst.insertedSide ^ 1);
+    if (nextSide >= fst.totalSides) nextSide = (fst.insertedSide + 1) % fst.totalSides;
+    _famicom.setFdsDiskSide(nextSide);
+    [self refreshMenuStates];
+    NSString *lbl = [AppDelegate labelForFdsSide:nextSide totalSides:fst.totalSides];
+    [_screenView showStatusBannerText:app_l10n::tr(
+        [NSString stringWithFormat:@"ディスク裏返し: %@", lbl],
+        [NSString stringWithFormat:@"Flipped Disk: %@", lbl])];
+}
+
+- (void)ejectFdsDisk:(id)sender {
+    (void)sender;
+    if (!_famicom.isLoaded() || !_famicom.isFdsActive()) return;
+    const FdsDriveStatus fst = _famicom.fdsDriveStatus();
+    if (fst.insertedSide < 0) return;
+    _famicom.ejectFdsDisk();
+    [self refreshMenuStates];
+    [_screenView showStatusBannerText:app_l10n::tr(@"ディスクを抜きました", @"Disk Ejected")];
+}
+
+- (void)insertFdsSide:(int)side {
+    if (!_famicom.isLoaded() || !_famicom.isFdsActive()) return;
+    const FdsDriveStatus fst = _famicom.fdsDriveStatus();
+    if (fst.insertedSide >= 0 || side < 0 || side >= fst.totalSides) return;
+    _famicom.setFdsDiskSide(side);
+    [self refreshMenuStates];
+    NSString *lbl = [AppDelegate labelForFdsSide:side totalSides:fst.totalSides];
+    [_screenView showStatusBannerText:app_l10n::tr(
+        [NSString stringWithFormat:@"ディスク挿入: %@", lbl],
+        [NSString stringWithFormat:@"Inserted: %@", lbl])];
+}
+
+- (void)insertFdsSideFromMenu:(NSMenuItem *)sender {
+    [self insertFdsSide:static_cast<int>(sender.tag)];
+}
+
+- (void)triggerFdsRandomFault:(id)sender {
+    (void)sender;
+    if (!_famicom.isLoaded() || !_famicom.isFdsActive()) return;
+    const FdsDriveStatus fst = _famicom.fdsDriveStatus();
+    if (fst.totalSides <= 0) return;
+    if (_famicom.triggerRandomFdsFault() > 0) {
+        [self refreshMenuStates];
+        [_screenView showStatusBannerText:app_l10n::tr(
+            @"FDS: 読込エラー再現 (ランダム故障)",
+            @"FDS: Simulated Read Error (Random Fault)")];
+    }
 }
 
 - (void)toggleFreeze:(id)sender {
@@ -405,54 +553,28 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 - (void)handleCartridgeContactKey:(NSEvent *)event {
     if (!_famicom.isLoaded()) return;
 
-    const BOOL shiftDown = (event.modifierFlags & NSEventModifierFlagShift) != 0;
-    NSString *charsIgn = event.charactersIgnoringModifiers ?: @"";
-    const BOOL isPinKey = [charsIgn isEqualToString:@"\\"] || [charsIgn isEqualToString:@"¥"] ||
-                          (event.keyCode == kVK_ANSI_Backslash && ![charsIgn isEqualToString:@"]"]);
-
-    if (isPinKey) {
-        if (!event.isARepeat) [_screenView toggleConnectorHudPinned];
-        return;
+    switch (famicom_input::applyCartridgeContactKeyEvent(event, _cartTilt, _cartLift, _cartPitch)) {
+        case famicom_input::CartridgeContactAction::None:
+            return;
+        case famicom_input::CartridgeContactAction::TogglePinHud:
+            [_screenView toggleConnectorHudPinned];
+            return;
+        case famicom_input::CartridgeContactAction::Reseat:
+            _famicom.reseatCartridge();
+            if (_screenView.consolePowered) [_screenView triggerCartridgeBump];
+            [_screenView showConnectorHud];
+            return;
+        case famicom_input::CartridgeContactAction::PoseChanged:
+            _famicom.setCartridgePose(_cartTilt, _cartLift, _cartPitch);
+            if (_screenView.consolePowered && (!event.isARepeat || (std::abs(_cartTilt) & 3) == 0)) {
+                [_screenView triggerCartridgeBump];
+            }
+            [_screenView showConnectorHud];
+            return;
+        case famicom_input::CartridgeContactAction::Unchanged:
+            [_screenView showConnectorHud];
+            return;
     }
-    if (event.keyCode == kVK_ANSI_Slash) {
-        if (event.isARepeat) return;
-        _cartTilt = 0;
-        _cartLift = 0;
-        _cartPitch = 0;
-        _famicom.reseatCartridge();
-        if (_screenView.consolePowered) {
-            [_screenView triggerCartridgeBump];
-        }
-        [_screenView showConnectorHud];
-        return;
-    }
-
-    const int prevTilt = _cartTilt;
-    const int prevLift = _cartLift;
-    const int prevPitch = _cartPitch;
-
-    if ([charsIgn isEqualToString:@"["]) {
-        _cartPitch = std::max(-8, _cartPitch - 1);
-    } else if ([charsIgn isEqualToString:@"]"]) {
-        _cartPitch = std::min(8, _cartPitch + 1);
-    } else if (event.keyCode == kVK_ANSI_Comma) {
-        if (shiftDown) _cartLift = std::min(16, _cartLift + 1);
-        else           _cartTilt = std::max(-32, _cartTilt - 1);
-    } else if (shiftDown) {
-        if (_cartLift > 0)      _cartLift = std::max(0, _cartLift - 1);
-        else if (_cartTilt < 0) _cartTilt += 1;
-        else if (_cartTilt > 0) _cartTilt -= 1;
-    } else {
-        _cartTilt = std::min(32, _cartTilt + 1);
-    }
-
-    if (_cartTilt != prevTilt || _cartLift != prevLift || _cartPitch != prevPitch) {
-        _famicom.setCartridgePose(_cartTilt, _cartLift, _cartPitch);
-        if (_screenView.consolePowered && (!event.isARepeat || (std::abs(_cartTilt) & 3) == 0)) {
-            [_screenView triggerCartridgeBump];
-        }
-    }
-    [_screenView showConnectorHud];
 }
 
 - (void)crtScreenDidReceiveKeyDown:(NSEvent *)event {
@@ -460,11 +582,11 @@ bool isCartridgeContactShortcut(NSEvent *event) {
         event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption);
 
     if (cmdMods == 0) {
-        if (isContactFaultBootShortcut(event)) {
+        if (famicom_input::isContactFaultBootShortcut(event)) {
             if (!event.isARepeat) [self toggleBadBootSwitch:nil];
             return;
         }
-        if (isCartridgeContactShortcut(event)) {
+        if (famicom_input::isCartridgeContactShortcut(event)) {
             [self handleCartridgeContactKey:event];
             return;
         }
@@ -474,6 +596,33 @@ bool isCartridgeContactShortcut(NSEvent *event) {
         if (event.keyCode == kVK_ANSI_O) {
             [self toggleConsolePower:nil];
             return;
+        }
+        if (event.keyCode == kVK_ANSI_G && _famicom.isLoaded() && _screenView.consolePowered && _famicom.is3dSystemActive()) {
+            [self cycle3dViewMode];
+            return;
+        }
+        if (_famicom.isLoaded() && _famicom.isFdsActive()) {
+            if (event.keyCode == kVK_ANSI_C) {
+                [self flipFdsDisk:nil];
+                return;
+            }
+            if (event.keyCode == kVK_ANSI_E) {
+                [self ejectFdsDisk:nil];
+                return;
+            }
+            if (event.keyCode == kVK_ANSI_T) {
+                [self triggerFdsRandomFault:nil];
+                return;
+            }
+            int sideKey = -1;
+            if (event.keyCode == kVK_ANSI_1) sideKey = 0;
+            else if (event.keyCode == kVK_ANSI_2) sideKey = 1;
+            else if (event.keyCode == kVK_ANSI_3) sideKey = 2;
+            else if (event.keyCode == kVK_ANSI_4) sideKey = 3;
+            if (sideKey >= 0) {
+                [self insertFdsSide:sideKey];
+                return;
+            }
         }
         if (event.keyCode == kVK_ANSI_F) {
             [self toggleFreeze:nil];
@@ -549,79 +698,43 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 - (void)toggleLeftStickDpad:(id)sender     { [self applyInputBindings:^(InputBindings &b) { b.useLeftStick = !b.useLeftStick; }]; }
 - (void)resetBindingsToDefaults:(id)sender { [self applyInputBindings:^(InputBindings &b) { b = InputBindings::defaults(); }]; }
 
-- (uint32_t)sampleKeyboardMask {
-    uint32_t mask = 0;
-    if (isBindingDown(_bindings.keys[FC_BTN_UP], _pressedKeys))     mask |= (1u << JOYPAD_UP);
-    if (isBindingDown(_bindings.keys[FC_BTN_DOWN], _pressedKeys))   mask |= (1u << JOYPAD_DOWN);
-    if (isBindingDown(_bindings.keys[FC_BTN_LEFT], _pressedKeys))   mask |= (1u << JOYPAD_LEFT);
-    if (isBindingDown(_bindings.keys[FC_BTN_RIGHT], _pressedKeys))  mask |= (1u << JOYPAD_RIGHT);
-    if (isBindingDown(_bindings.keys[FC_BTN_B], _pressedKeys))      mask |= (1u << JOYPAD_B);
-    if (isBindingDown(_bindings.keys[FC_BTN_A], _pressedKeys))      mask |= (1u << JOYPAD_A);
-    if (isBindingDown(_bindings.keys[FC_BTN_SELECT], _pressedKeys)) mask |= (1u << JOYPAD_SELECT);
-    if (isBindingDown(_bindings.keys[FC_BTN_START], _pressedKeys))  mask |= (1u << JOYPAD_START);
-    return mask;
+- (void)resetAllSettingsToDefaults:(id)sender {
+    (void)sender;
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.messageText = app_l10n::tr(@"すべての設定を初期値に戻しますか？",
+                                     @"Reset all settings to defaults?");
+    alert.informativeText = app_l10n::tr(
+        @"CRT表示（RF/RGB・走査線・歪み等）、音声ミュート、コントローラキー割り当て、言語設定がすべて初期設定に戻ります。（ROM履歴とステートセーブは保持されます）",
+        @"CRT display options, audio mute state, controller bindings, and language preference will all be restored to defaults. Recent ROM history and save states are kept.");
+    [alert addButtonWithTitle:app_l10n::tr(@"初期値に戻す", @"Reset")];
+    [alert addButtonWithTitle:app_l10n::tr(@"キャンセル", @"Cancel")];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    app_prefs::clearDisplayPreferences();
+    const CrtDisplayConfig defaults{};
+    _screenView.displayConfig = defaults;
+    _screenView.view3dMode = Famicom3dViewMode::NakedCrt;
+    _screenView.invert3dEyes = NO;
+    _audioEngine.setRfTvMode(defaults.rfMode, defaults.rfSnow, defaults.rfSignal);
+    _audioEngine.setMuted(false);
+    _bindings = InputBindings::defaults();
+    _bindings.saveToDefaults();
+    [self applyLanguageMode:AppLanguageMode::System];
+    [_screenView showStatusBannerText:app_l10n::tr(@"すべての設定を初期値に戻しました", @"All settings reset to defaults")];
 }
 
 - (uint32_t)sampleControllerMask {
-    uint32_t mask = [self sampleKeyboardMask];
-    bool l2Held = false;
-    bool r2Held = false;
-    bool selectHeld = false;
-
-    for (GCController *controller in [GCController controllers]) {
-        GCExtendedGamepad *pad = controller.extendedGamepad;
-        if (!pad) continue;
-
-        const bool optionsDown = ([pad respondsToSelector:@selector(buttonOptions)] &&
-                                  pad.buttonOptions && pad.buttonOptions.pressed);
-        const bool stickUp    = _bindings.useLeftStick && (pad.leftThumbstick.yAxis.value > 0.35f);
-        const bool stickDown  = _bindings.useLeftStick && (pad.leftThumbstick.yAxis.value < -0.35f);
-        const bool stickLeft  = _bindings.useLeftStick && (pad.leftThumbstick.xAxis.value < -0.35f);
-        const bool stickRight = _bindings.useLeftStick && (pad.leftThumbstick.xAxis.value > 0.35f);
-
-        const bool faceB = pad.buttonB.pressed || pad.buttonX.pressed;
-        const bool faceA = pad.buttonA.pressed || pad.buttonY.pressed;
-        const bool nesB = _bindings.swapGamepadAB ? faceA : faceB;
-        const bool nesA = _bindings.swapGamepadAB ? faceB : faceA;
-
-        if (pad.dpad.up.pressed || stickUp)          mask |= (1u << JOYPAD_UP);
-        if (pad.dpad.down.pressed || stickDown)      mask |= (1u << JOYPAD_DOWN);
-        if (pad.dpad.left.pressed || stickLeft)      mask |= (1u << JOYPAD_LEFT);
-        if (pad.dpad.right.pressed || stickRight)    mask |= (1u << JOYPAD_RIGHT);
-        if (nesB)                                    mask |= (1u << JOYPAD_B);
-        if (nesA)                                    mask |= (1u << JOYPAD_A);
-        if (pad.buttonMenu.pressed)                  mask |= (1u << JOYPAD_START);
-        if (optionsDown || pad.leftShoulder.pressed) mask |= (1u << JOYPAD_SELECT);
-
-        if (_bindings.allowGamepadSaveLoad) {
-            l2Held = l2Held || (pad.leftTrigger.value > 0.65f);
-            r2Held = r2Held || (pad.rightTrigger.value > 0.65f);
-            selectHeld = selectHeld || optionsDown || pad.leftShoulder.pressed;
-        }
-    }
-
-    if (l2Held && !_prevGamepadL2) [self quickSave:nil];
-    if (r2Held && !_prevGamepadR2 && selectHeld) [self quickLoad:nil];
-    _prevGamepadL2 = l2Held ? YES : NO;
-    _prevGamepadR2 = r2Held ? YES : NO;
-    return mask;
+    const famicom_input::PollResult result =
+        famicom_input::sampleControllerInput(_bindings, _pressedKeys, _gamepadHotkeys);
+    if (result.quickSaveTriggered) [self quickSave:nil];
+    if (result.quickLoadTriggered) [self quickLoad:nil];
+    return result.padMask;
 }
 
 #pragma mark - Emulation Loop & Lifecycle
 
-- (void)tickEmulation:(NSTimer *)timer {
-    // Micro-adjust frame deadline toward nominal audio queue fill so NTSC 60.0988 Hz runs crackle-free.
-    const double nominalPeriodNs = 1e9 / std::max(_famicom.fps(), 50.0);
-    const size_t queued = _audioEngine.queuedFrames();
-    const size_t target = _audioEngine.targetBufferFrames();
-    double clockAdjust = 1.0;
-    if (queued > target + 1024)      clockAdjust = 1.006;
-    else if (queued + 1024 < target) clockAdjust = 0.994;
-
-    const uint64_t now = monotonicNowNs();
-    if (_nextFrameDeadlineNs == 0) _nextFrameDeadlineNs = now;
-    if (now < _nextFrameDeadlineNs) return;
-
+- (void)advanceOneFrame {
     const size_t samplesPerFrame =
         static_cast<size_t>(std::round(_famicom.sampleRate() / std::max(_famicom.fps(), 50.0)));
 
@@ -644,19 +757,18 @@ bool isCartridgeContactShortcut(NSEvent *event) {
             _audioEngine.pushFrames(frames, count);
         });
         _audioEngine.setCartridgeAudioGain(_famicom.cartridgeAudioGain());
+        const FdsDriveStatus fst = _famicom.fdsDriveStatus();
+        const BOOL threeDNow = _famicom.is3dSystemActive() ? YES : NO;
+        if ([_menuController needsDynamicMenuSyncForThreeD:threeDNow fdsStatus:fst]) {
+            [self refreshMenuStates];
+        }
         _audioEngine.updateScreenMetrics(_famicom.currentPixels(), _famicom.width(), _famicom.height());
         [_screenView presentLatestFrame];
-    }
-
-    _nextFrameDeadlineNs += static_cast<uint64_t>(nominalPeriodNs * clockAdjust);
-    // Snap deadline forward after window drag or macOS sleep rather than catching up in a burst.
-    if (now > _nextFrameDeadlineNs + static_cast<uint64_t>(nominalPeriodNs * 3.0)) {
-        _nextFrameDeadlineNs = now;
     }
 }
 
 - (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename {
-    if (![[filename.pathExtension lowercaseString] isEqualToString:@"nes"]) {
+    if (!isSupportedRomOrBiosPath(filename)) {
         return NO;
     }
     if (_screenView) {
@@ -699,7 +811,7 @@ bool isCartridgeContactShortcut(NSEvent *event) {
     NSArray<NSString *> *args = [[NSProcessInfo processInfo] arguments];
     NSString *startupRom = _pendingRomPath;
     _pendingRomPath = nil;
-    if (!startupRom && args.count > 1 && [[args[1].pathExtension lowercaseString] isEqualToString:@"nes"]) {
+    if (!startupRom && args.count > 1 && isSupportedRomOrBiosPath(args[1])) {
         startupRom = args[1];
     }
 
@@ -713,12 +825,17 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 
     [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
 
-    _frameTimer = [NSTimer timerWithTimeInterval:0.002
-                                          target:self
-                                        selector:@selector(tickEmulation:)
-                                        userInfo:nil
-                                         repeats:YES];
-    [[NSRunLoop currentRunLoop] addTimer:_frameTimer forMode:NSRunLoopCommonModes];
+    _pacer = [[EmulationPacer alloc] init];
+    __weak AppDelegate *weakSelf = self;
+    [_pacer startWithView:_screenView
+              fpsProvider:^double {
+                  AppDelegate *strong = weakSelf;
+                  return strong ? strong->_famicom.fps() : 60.0988;
+              }
+                stepBlock:^{
+                    AppDelegate *strong = weakSelf;
+                    if (strong) [strong advanceOneFrame];
+                }];
 }
 
 - (void)applicationWillResignActive:(NSNotification *)notification {
@@ -727,8 +844,9 @@ bool isCartridgeContactShortcut(NSEvent *event) {
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
-    [_frameTimer invalidate];
-    _frameTimer = nil;
+    [self saveCurrentFdsDiskDiff];
+    [_pacer stop];
+    _pacer = nil;
     _audioEngine.stop();
     _famicom.unload();
 }

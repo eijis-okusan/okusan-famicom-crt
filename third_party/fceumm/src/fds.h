@@ -11,5 +11,6 @@ void FCEU_FDSEject(void);
 void FCEU_FDSSelect(void);
 
 int FDSLoad(const char *name, FCEUFILE *fp);
+int FDSIsBiosStream(FCEUFILE *fp);
 
 #endif

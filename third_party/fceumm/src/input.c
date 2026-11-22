@@ -29,6 +29,7 @@
 #include "fceu.h"
 #include "state.h"
 
+#include "okusan_cart.h"
 #include "input.h"
 #include "vsuni.h"
 #include "fds.h"
@@ -92,6 +93,8 @@ static DECLFR(JPRead)
 
 static DECLFW(B4016)
 {
+	okusan_record_4016_out1((V >> 1) & 1u);
+
 	if (FCExp)
 		if (FCExp->Write)
 			FCExp->Write(V & 7);

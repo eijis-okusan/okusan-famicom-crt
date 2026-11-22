@@ -149,6 +149,87 @@ static uint8_t * MMC5BGVRAMADR(uint32_t V) {
 	} else return &MMC5BGVPage[(V) >> 10][(V)];
 }
 
+/* Famicom 3D System ($4016 OUT1) shutter telemetry */
+static uint8_t okusan_4016_out1 = 0;
+static uint8_t okusan_4016_mid_eye = 0;
+static uint8_t okusan_4016_mid_sampled = 0;
+static uint8_t okusan_4016_frame_out1_hi = 0;
+static uint8_t okusan_3d_prev_mid_eye = 0;
+static uint8_t okusan_3d_prev_pulse_eye = 0;
+static uint8_t okusan_3d_mid_flip_streak = 0;
+static uint8_t okusan_3d_pulse_flip_streak = 0;
+static uint8_t okusan_3d_mid_idle = 0;
+static uint8_t okusan_3d_pulse_idle = 0;
+static int okusan_3d_active = 0;
+static int okusan_3d_current_eye = 0;
+
+__attribute__((visibility("default")))
+void okusan_record_4016_out1(uint8_t out1_bit) {
+	uint8_t bit = (uint8_t)(out1_bit & 1u);
+	okusan_4016_out1 = bit;
+	if (bit) {
+		okusan_4016_frame_out1_hi = 1;
+	}
+}
+
+__attribute__((visibility("default")))
+int okusan_get_3d_system_active(void) {
+	return okusan_3d_active;
+}
+
+__attribute__((visibility("default")))
+int okusan_get_3d_current_eye(void) {
+	return okusan_3d_current_eye;
+}
+
+static void okusan_update_3d_frame(void) {
+	uint8_t mid_eye = okusan_4016_mid_sampled ? okusan_4016_mid_eye : okusan_4016_out1;
+	uint8_t pulse_eye = okusan_4016_frame_out1_hi;
+
+	if (mid_eye != okusan_3d_prev_mid_eye) {
+		if (okusan_3d_mid_flip_streak < 255) {
+			okusan_3d_mid_flip_streak++;
+		}
+		okusan_3d_mid_idle = 0;
+	} else {
+		if (okusan_3d_mid_idle < 255) {
+			okusan_3d_mid_idle++;
+		}
+		if (okusan_3d_mid_idle >= 24) {
+			okusan_3d_mid_flip_streak = 0;
+		}
+	}
+
+	if (pulse_eye != okusan_3d_prev_pulse_eye) {
+		if (okusan_3d_pulse_flip_streak < 255) {
+			okusan_3d_pulse_flip_streak++;
+		}
+		okusan_3d_pulse_idle = 0;
+	} else {
+		if (okusan_3d_pulse_idle < 255) {
+			okusan_3d_pulse_idle++;
+		}
+		if (okusan_3d_pulse_idle >= 24) {
+			okusan_3d_pulse_flip_streak = 0;
+		}
+	}
+
+	/* Prefer mid-frame OUT1 sample; fall back to per-frame OUT1 pulse if BIOS pad reads reset bit 1. */
+	if (okusan_3d_mid_flip_streak >= 4 && okusan_3d_mid_idle < 24) {
+		okusan_3d_current_eye = (int)mid_eye;
+		okusan_3d_active = 1;
+	} else if (okusan_3d_pulse_flip_streak >= 4 && okusan_3d_pulse_idle < 24) {
+		okusan_3d_current_eye = (int)pulse_eye;
+		okusan_3d_active = 1;
+	} else {
+		okusan_3d_current_eye = (int)mid_eye;
+		okusan_3d_active = 0;
+	}
+
+	okusan_3d_prev_mid_eye = mid_eye;
+	okusan_3d_prev_pulse_eye = pulse_eye;
+}
+
 /* Okusan CRT: Inline 2C02 PPU Bus Hooks backed by okusan_cart.c */
 static uint32_t okusan_last_ppu_addr = 0x0000u;
 static uint8_t  okusan_last_ppu_data = 0x00u;
@@ -551,7 +632,7 @@ static DECLFW(B2007) {
 			if (okusan_cart_is_active()) {
 				if (okusan_cart_rt.power_dead ||
 				    okusan_ctrl_pin_dropped(OKUSAN_PIN_PPU_WR,  163u, 110u) ||
-				    okusan_ctrl_pin_dropped(OKUSAN_PIN_PPU_A13, 167u,  90u)) {
+				    okusan_ctrl_pin_dropped(OKUSAN_PIN_PPU_A13, 167u, 90u)) {
 					wr_ok = 0;
 				} else {
 					wr_addr = okusan_map_chr_addr(tmp, (tmp >> 3) & 1);
@@ -1481,6 +1562,18 @@ void FCEUPPU_Reset(void) {
 	vtoggle = 0;
 	ppudead = 2;
 	kook = 0;
+	okusan_4016_out1 = 0;
+	okusan_4016_mid_eye = 0;
+	okusan_4016_mid_sampled = 0;
+	okusan_4016_frame_out1_hi = 0;
+	okusan_3d_prev_mid_eye = 0;
+	okusan_3d_prev_pulse_eye = 0;
+	okusan_3d_mid_flip_streak = 0;
+	okusan_3d_pulse_flip_streak = 0;
+	okusan_3d_mid_idle = 0;
+	okusan_3d_pulse_idle = 0;
+	okusan_3d_active = 0;
+	okusan_3d_current_eye = 0;
 }
 
 void FCEUPPU_Power(void) {
@@ -1517,6 +1610,9 @@ void FCEUPPU_Power(void) {
 
 int FCEUPPU_Loop(int skip) {
 	okusan_begin_ppu_frame();
+	okusan_fds_tick_frame();
+	okusan_4016_mid_sampled = 0;
+	okusan_4016_frame_out1_hi = 0;
 	/* Needed for Knight Rider, possibly others. */
 	if (ppudead) {
 		memset(XBuf, 0x80, 256 * 240);
@@ -1591,6 +1687,10 @@ int FCEUPPU_Loop(int skip) {
 				totalscanlines = normal_scanlines + (overclock_enabled ? extrascanlines : 0);
 
 			for (scanline = 0; (unsigned)scanline < totalscanlines; ) {	/* scanline is incremented in  DoLine.  Evil. :/ */
+				if (scanline == 120) {
+					okusan_4016_mid_eye = okusan_4016_out1;
+					okusan_4016_mid_sampled = 1;
+				}
 				deempcnt[deemp]++;
 				DoLine();
 				if ((unsigned)scanline < normal_scanlines || (unsigned)scanline == totalscanlines)
@@ -1616,6 +1716,7 @@ int FCEUPPU_Loop(int skip) {
 	}
 
 	{
+		okusan_update_3d_frame();
 		FCEU_PutImage();
 		return(1);
 	}

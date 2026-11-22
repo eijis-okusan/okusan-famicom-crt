@@ -41,6 +41,12 @@ struct MacAudioEngine::RingState {
     uint32_t freezeRng = 0x5A17C0DEu;
     size_t freezeSampleAge = 0;
     double sampleRateHz = 48000.0;
+    size_t targetBufferFrames = 2496;
+    double drcPos = 0.0;
+    float prevRawL = 0.0f;
+    float prevRawR = 0.0f;
+    float lastRenderL = 0.0f;
+    float lastRenderR = 0.0f;
 
     uint32_t nextFreezeRand() {
         freezeRng ^= freezeRng << 13;
@@ -211,7 +217,6 @@ struct MacAudioEngine::RingState {
         const size_t w = writeIndex.load(std::memory_order_relaxed);
         const size_t used = (w >= r) ? (w - r) : (kRingCapacityFrames - r + w);
         const size_t freeFrames = kRingCapacityFrames - 1 - used;
-        const size_t framesToWrite = std::min(frameCount, freeFrames);
 
         const bool rfOn = rfEnabled.load(std::memory_order_relaxed);
         const float snowLevel = rfSnow.load(std::memory_order_relaxed);
@@ -221,6 +226,56 @@ struct MacAudioEngine::RingState {
         // Smooth cartridge SND IN/OUT contact attenuation over ~5 ms to prevent crackles while tilting.
         constexpr float gainAlpha = 0.0045f;
         constexpr float int16Scale = 1.0f / 32768.0f;
+
+        // Dynamic Rate Control (<= +-1.2%) locks CoreAudio buffer to targetBufferFrames when VSync-locked.
+        const double err = static_cast<double>(used) - static_cast<double>(targetBufferFrames);
+        const double drcStep = std::clamp(1.0 + err / 60000.0, 0.988, 1.012);
+
+        if (!useFreezeLoop && interleavedStereo) {
+            for (size_t i = 0; i < frameCount; ++i) {
+                const float rawL = static_cast<float>(interleavedStereo[i * 2 + 0]) * int16Scale;
+                const float rawR = static_cast<float>(interleavedStereo[i * 2 + 1]) * int16Scale;
+                recentL[recentWritePos] = rawL * smoothedCartGain;
+                recentR[recentWritePos] = rawR * smoothedCartGain;
+                recentWritePos = (recentWritePos + 1) % kFreezeHistoryFrames;
+                if (recentValidCount < kFreezeHistoryFrames) ++recentValidCount;
+            }
+
+            size_t written = 0;
+            while (drcPos < static_cast<double>(frameCount) && written < freeFrames) {
+                const size_t i0 = static_cast<size_t>(drcPos);
+                const float frac = static_cast<float>(drcPos - static_cast<double>(i0));
+                const float sPrevL = (i0 == 0) ? prevRawL : static_cast<float>(interleavedStereo[(i0 - 1) * 2 + 0]) * int16Scale;
+                const float sPrevR = (i0 == 0) ? prevRawR : static_cast<float>(interleavedStereo[(i0 - 1) * 2 + 1]) * int16Scale;
+                const float sCurrL = static_cast<float>(interleavedStereo[i0 * 2 + 0]) * int16Scale;
+                const float sCurrR = static_cast<float>(interleavedStereo[i0 * 2 + 1]) * int16Scale;
+
+                smoothedCartGain += (targetGain - smoothedCartGain) * gainAlpha;
+                const float inL = (sPrevL + (sCurrL - sPrevL) * frac) * smoothedCartGain;
+                const float inR = (sPrevR + (sCurrR - sPrevR) * frac) * smoothedCartGain;
+
+                float outL = inL;
+                float outR = inR;
+                speakerDsp.processStereoSample(inL, inR, rfOn, snowLevel, signalLevel, videoStats, outL, outR);
+                const size_t dst = ((w + written) % kRingCapacityFrames) * 2;
+                ringBuffer[dst + 0] = outL;
+                ringBuffer[dst + 1] = outR;
+                ++written;
+                drcPos += drcStep;
+            }
+            drcPos -= static_cast<double>(frameCount);
+            if (drcPos < 0.0) drcPos = 0.0;
+            prevRawL = static_cast<float>(interleavedStereo[(frameCount - 1) * 2 + 0]) * int16Scale;
+            prevRawR = static_cast<float>(interleavedStereo[(frameCount - 1) * 2 + 1]) * int16Scale;
+            writeIndex.store((w + written) % kRingCapacityFrames, std::memory_order_release);
+            return;
+        }
+
+        const size_t drcCount = static_cast<size_t>(std::llround(static_cast<double>(frameCount) / drcStep));
+        const size_t framesToWrite = std::min(drcCount, freeFrames);
+        drcPos = 0.0;
+        prevRawL = 0.0f;
+        prevRawR = 0.0f;
 
         for (size_t i = 0; i < framesToWrite; ++i) {
             smoothedCartGain += (targetGain - smoothedCartGain) * gainAlpha;
@@ -247,13 +302,6 @@ struct MacAudioEngine::RingState {
                     inR = freezeLoopR[sampleIdx];
                 }
                 freezeCursor = (freezeCursor + 1) % loopSize;
-            } else if (interleavedStereo) {
-                inL = static_cast<float>(interleavedStereo[i * 2 + 0]) * int16Scale * smoothedCartGain;
-                inR = static_cast<float>(interleavedStereo[i * 2 + 1]) * int16Scale * smoothedCartGain;
-                recentL[recentWritePos] = inL;
-                recentR[recentWritePos] = inR;
-                recentWritePos = (recentWritePos + 1) % kFreezeHistoryFrames;
-                if (recentValidCount < kFreezeHistoryFrames) ++recentValidCount;
             }
 
             float outL = inL;
@@ -280,7 +328,9 @@ struct MacAudioEngine::RingState {
         const size_t w = self->writeIndex.load(std::memory_order_acquire);
         const size_t available = (w >= r) ? (w - r) : (kRingCapacityFrames - r + w);
 
-        if (self->muted.load(std::memory_order_relaxed) || available == 0) {
+        if (self->muted.load(std::memory_order_relaxed)) {
+            self->lastRenderL = 0.0f;
+            self->lastRenderR = 0.0f;
             std::fill(out, out + requested * 2, 0.0f);
             if (available > 0) {
                 const size_t discard = std::min(available, requested);
@@ -295,10 +345,19 @@ struct MacAudioEngine::RingState {
             out[i * 2 + 0] = self->ringBuffer[src + 0];
             out[i * 2 + 1] = self->ringBuffer[src + 1];
         }
-        if (toRead < requested) {
-            std::fill(out + toRead * 2, out + requested * 2, 0.0f);
+        if (toRead > 0) {
+            self->lastRenderL = out[(toRead - 1) * 2 + 0];
+            self->lastRenderR = out[(toRead - 1) * 2 + 1];
         }
-        self->readIndex.store((r + toRead) % kRingCapacityFrames, std::memory_order_release);
+        for (size_t i = toRead; i < requested; ++i) {
+            self->lastRenderL *= 0.985f;
+            self->lastRenderR *= 0.985f;
+            out[i * 2 + 0] = self->lastRenderL;
+            out[i * 2 + 1] = self->lastRenderR;
+        }
+        if (toRead > 0) {
+            self->readIndex.store((r + toRead) % kRingCapacityFrames, std::memory_order_release);
+        }
         return noErr;
     }
 };
@@ -319,8 +378,18 @@ bool MacAudioEngine::start(double sampleRate) {
     ring_->sampleRateHz = sampleRate;
     // Keep ~52 ms queued ahead to absorb AppKit key-repeat cadence jitter when holding tilt keys.
     targetFrames_ = static_cast<size_t>(sampleRate * 0.052);
+    ring_->targetBufferFrames = targetFrames_;
+    ring_->drcPos = 0.0;
+    ring_->prevRawL = 0.0f;
+    ring_->prevRawR = 0.0f;
     ring_->smoothedCartGain = ring_->cartAudioGain.load(std::memory_order_relaxed);
     ring_->speakerDsp.configure(sampleRate);
+    ring_->lastRenderL = 0.0f;
+    ring_->lastRenderR = 0.0f;
+    const size_t prefill = std::min(targetFrames_, RingState::kRingCapacityFrames / 2);
+    std::fill(ring_->ringBuffer.begin(), ring_->ringBuffer.begin() + prefill * 2, 0.0f);
+    ring_->readIndex.store(0, std::memory_order_relaxed);
+    ring_->writeIndex.store(prefill, std::memory_order_release);
 
     AudioComponentDescription desc{};
     desc.componentType = kAudioUnitType_Output;

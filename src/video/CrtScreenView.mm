@@ -1,132 +1,34 @@
 #import "CrtScreenView.hpp"
+#import "app/AppLocalization.hpp"
 #import "core/FamicomCore.hpp"
 #import "hud/CartConnectorHud.hpp"
+#import "video/CrtShaderProgram.hpp"
 #import "video/FreezeFrameGenerator.hpp"
+#import "video/StatusBanner.hpp"
 
 #import <OpenGL/gl.h>
 #import <OpenGL/glext.h>
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
-#include <string>
 #include <vector>
 
 namespace {
-
-std::string loadBundledShader(NSString *shaderName) {
-    NSString *path = [[NSBundle mainBundle] pathForResource:shaderName ofType:@"glsl" inDirectory:@"shaders"];
-    if (!path) {
-        std::fprintf(stderr, "Missing shader resource: %s.glsl\n", [shaderName UTF8String]);
-        return "";
-    }
-    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-    return text ? std::string([text UTF8String]) : "";
-}
-
-// RetroArch-style single-file shaders switch between VERTEX and FRAGMENT sections via #define.
-std::string injectDefinesAfterVersion(const std::string &source, const std::string &defines) {
-    const size_t firstNewline = source.find('\n');
-    if (firstNewline == std::string::npos) return defines + "\n" + source;
-    return source.substr(0, firstNewline + 1) + defines + "\n" + source.substr(firstNewline + 1);
-}
-
-GLuint compileShaderStage(GLenum stageType, const std::string &source, const char *label) {
-    GLuint shader = glCreateShader(stageType);
-    const char *raw = source.c_str();
-    glShaderSource(shader, 1, &raw, nullptr);
-    glCompileShader(shader);
-
-    GLint status = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
-    if (!status) {
-        char infoLog[4096] = {0};
-        glGetShaderInfoLog(shader, sizeof(infoLog) - 1, nullptr, infoLog);
-        std::fprintf(stderr, "Shader compile error (%s):\n%s\n", label, infoLog);
-        glDeleteShader(shader);
-        return 0;
-    }
-    return shader;
-}
-
-GLuint linkShaderProgram(const std::string &source, const char *label) {
-    if (source.empty()) return 0;
-
-    GLuint vertexShader = compileShaderStage(
-        GL_VERTEX_SHADER,
-        injectDefinesAfterVersion(source, "#define VERTEX\n#define PARAMETER_UNIFORM\n"),
-        label);
-    GLuint fragmentShader = compileShaderStage(
-        GL_FRAGMENT_SHADER,
-        injectDefinesAfterVersion(source, "#define FRAGMENT\n#define PARAMETER_UNIFORM\n"),
-        label);
-    if (!vertexShader || !fragmentShader) {
-        if (vertexShader) glDeleteShader(vertexShader);
-        if (fragmentShader) glDeleteShader(fragmentShader);
-        return 0;
-    }
-
-    GLuint program = glCreateProgram();
-    glAttachShader(program, vertexShader);
-    glAttachShader(program, fragmentShader);
-    glBindAttribLocation(program, 0, "VertexCoord");
-    glBindAttribLocation(program, 1, "TexCoord");
-    glLinkProgram(program);
-    glDeleteShader(vertexShader);
-    glDeleteShader(fragmentShader);
-
-    GLint linked = 0;
-    glGetProgramiv(program, GL_LINK_STATUS, &linked);
-    if (!linked) {
-        char infoLog[4096] = {0};
-        glGetProgramInfoLog(program, sizeof(infoLog) - 1, nullptr, infoLog);
-        std::fprintf(stderr, "Shader link error (%s):\n%s\n", label, infoLog);
-        glDeleteProgram(program);
-        return 0;
-    }
-    return program;
-}
-
-void drawFullscreenQuad() {
-    static const float vertices[4][2] = {{-1.f, -1.f}, {1.f, -1.f}, {-1.f, 1.f}, {1.f, 1.f}};
-    static const float texCoords[4][2] = {{0.f, 0.f}, {1.f, 0.f}, {0.f, 1.f}, {1.f, 1.f}};
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, vertices);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, texCoords);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
-}
-
-void uploadIdentityMvp(GLuint program) {
-    static const float identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-    const GLint loc = glGetUniformLocation(program, "MVPMatrix");
-    if (loc >= 0) glUniformMatrix4fv(loc, 1, GL_FALSE, identity);
-}
 
 NSString *firstDroppedNesPath(NSPasteboard *pasteboard) {
     NSArray<NSURL *> *urls = [pasteboard readObjectsForClasses:@[[NSURL class]]
                                                        options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
     for (NSURL *url in urls) {
-        if (url.isFileURL && [[url.pathExtension lowercaseString] isEqualToString:@"nes"]) {
+        if (!url.isFileURL) continue;
+        NSString *ext = [url.pathExtension lowercaseString];
+        if ([ext isEqualToString:@"nes"] ||
+            [ext isEqualToString:@"fds"] ||
+            [ext isEqualToString:@"rom"] ||
+            [ext isEqualToString:@"bin"]) {
             return url.path;
         }
     }
     return nil;
-}
-
-GLuint createFrameTexture() {
-    GLuint tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    std::vector<uint32_t> blank(512 * 256, 0xFF000000u);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 512, 256, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, blank.data());
-    return tex;
 }
 
 } // namespace
@@ -135,16 +37,26 @@ GLuint createFrameTexture() {
     FamicomCore *_core;
     BOOL _glInitialized;
 
-    GLuint _beamLoadProg;
-    GLuint _rgbDisplayProg;
-    GLuint _rfDisplayProg;
-    GLuint _bwDisplayProg;
+    CrtShaderProgram _beamLoadProg;
+    CrtShaderProgram _rgbDisplayProg;
+    CrtShaderProgram _rfDisplayProg;
+    CrtShaderProgram _bwDisplayProg;
 
-    GLuint _currentFrameTex;
-    GLuint _previousFrameTex;
+    GLuint _frameRingTex[4];
+    int _frameRingIdx;
+    GLuint _curTex;
+    GLuint _prevTex;
+    GLuint _eyeRingTex[2][2];
+    int _eyeRingIdx[2];
+    GLuint _eyeLeftTex;
+    GLuint _eyeRightTex;
     GLuint _beamLoadTex;
     GLuint _beamLoadFbo;
     int _frameCounter;
+    int _last3dRawEye;
+    Famicom3dViewMode _view3dMode;
+    BOOL _invert3dEyes;
+    CrtStatusBanner _banner;
     std::vector<uint32_t> _flipBuffer;
 
     BOOL _consolePowered;
@@ -205,6 +117,9 @@ GLuint createFrameTexture() {
         _hudCachedTilt = 9999;
         _hudCachedPin = -99;
         _hudNeedsRefresh = YES;
+        _view3dMode = Famicom3dViewMode::NakedCrt;
+        _invert3dEyes = NO;
+        _banner.showTime = -1000.0;
 
         if ([self respondsToSelector:@selector(setWantsBestResolutionOpenGLSurface:)]) {
             self.wantsBestResolutionOpenGLSurface = YES;
@@ -217,14 +132,21 @@ GLuint createFrameTexture() {
 - (void)dealloc {
     if (_glInitialized && self.openGLContext) {
         [self.openGLContext makeCurrentContext];
-        if (_beamLoadProg) glDeleteProgram(_beamLoadProg);
-        if (_rgbDisplayProg) glDeleteProgram(_rgbDisplayProg);
-        if (_rfDisplayProg) glDeleteProgram(_rfDisplayProg);
-        if (_bwDisplayProg) glDeleteProgram(_bwDisplayProg);
-        if (_currentFrameTex) glDeleteTextures(1, &_currentFrameTex);
-        if (_previousFrameTex) glDeleteTextures(1, &_previousFrameTex);
+        crt_gl::destroyShaderProgram(_beamLoadProg);
+        crt_gl::destroyShaderProgram(_rgbDisplayProg);
+        crt_gl::destroyShaderProgram(_rfDisplayProg);
+        crt_gl::destroyShaderProgram(_bwDisplayProg);
+        for (int i = 0; i < 4; ++i) {
+            if (_frameRingTex[i]) glDeleteTextures(1, &_frameRingTex[i]);
+        }
+        for (int e = 0; e < 2; ++e) {
+            for (int b = 0; b < 2; ++b) {
+                if (_eyeRingTex[e][b]) glDeleteTextures(1, &_eyeRingTex[e][b]);
+            }
+        }
         if (_beamLoadTex) glDeleteTextures(1, &_beamLoadTex);
         if (_hudTex) glDeleteTextures(1, &_hudTex);
+        _banner.destroyGL();
         if (_beamLoadFbo) glDeleteFramebuffersEXT(1, &_beamLoadFbo);
     }
 }
@@ -263,18 +185,33 @@ GLuint createFrameTexture() {
     [self requestRedraw];
 }
 
+- (void)pushRingFramePixels:(const uint32_t *)pixels width:(unsigned)width height:(unsigned)height {
+    _frameRingIdx = (_frameRingIdx + 1) & 3;
+    _prevTex = _curTex;
+    _curTex = _frameRingTex[_frameRingIdx];
+    [self uploadTopDownPixels:pixels toTexture:_curTex width:width height:height];
+}
+
+- (void)pushRingPairPrev:(const uint32_t *)prevPixels
+                     cur:(const uint32_t *)curPixels
+                   width:(unsigned)width
+                  height:(unsigned)height {
+    [self ensureGLReady];
+    [self.openGLContext makeCurrentContext];
+    [self pushRingFramePixels:prevPixels width:width height:height];
+    [self pushRingFramePixels:curPixels width:width height:height];
+}
+
 - (void)setFreezeEffect:(FreezeStyle)style seed:(uint32_t)seed active:(BOOL)active {
     if (!_core) return;
     if (!active) {
         const BOOL wasActive = _freezeGenerator.active() ? YES : NO;
         _freezeGenerator.clear();
         if (wasActive && _core->isLoaded()) {
-            [self ensureGLReady];
-            [self.openGLContext makeCurrentContext];
-            [self uploadTopDownPixels:_core->previousPixels() toTexture:_previousFrameTex
-                                width:_core->width() height:_core->height()];
-            [self uploadTopDownPixels:_core->currentPixels() toTexture:_currentFrameTex
-                                width:_core->width() height:_core->height()];
+            [self pushRingPairPrev:_core->previousPixels()
+                               cur:_core->currentPixels()
+                             width:_core->width()
+                            height:_core->height()];
         }
         [self requestRedraw];
         return;
@@ -284,16 +221,8 @@ GLuint createFrameTexture() {
                              _core->currentPixels(), _core->previousPixels());
     if (style != FreezeStyle::CleanTone && style != FreezeStyle::MachineGunStutter &&
         _freezeGenerator.width() > 0 && _freezeGenerator.height() > 0) {
-        [self ensureGLReady];
-        [self.openGLContext makeCurrentContext];
-        [self uploadTopDownPixels:_freezeGenerator.primaryPixels()
-                        toTexture:_currentFrameTex
-                            width:_freezeGenerator.width()
-                           height:_freezeGenerator.height()];
-        [self uploadTopDownPixels:_freezeGenerator.primaryPixels()
-                        toTexture:_previousFrameTex
-                            width:_freezeGenerator.width()
-                           height:_freezeGenerator.height()];
+        const uint32_t *initPx = _freezeGenerator.primaryPixels();
+        [self pushRingPairPrev:initPx cur:initPx width:_freezeGenerator.width() height:_freezeGenerator.height()];
     }
     [self triggerFreezeGlitch];
 }
@@ -303,9 +232,7 @@ GLuint createFrameTexture() {
     if (_freezeGenerator.advanceFrameAndShouldUpload()) {
         [self ensureGLReady];
         [self.openGLContext makeCurrentContext];
-        std::swap(_currentFrameTex, _previousFrameTex);
-        [self uploadTopDownPixels:_freezeGenerator.activeDisplayPixels()
-                        toTexture:_currentFrameTex
+        [self pushRingFramePixels:_freezeGenerator.activeDisplayPixels()
                             width:_freezeGenerator.width()
                            height:_freezeGenerator.height()];
     }
@@ -360,13 +287,25 @@ GLuint createFrameTexture() {
     GLint swapInterval = 0;
     [self.openGLContext setValues:&swapInterval forParameter:NSOpenGLContextParameterSwapInterval];
 
-    _beamLoadProg = linkShaderProgram(loadBundledShader(@"okusan-crt-beamload"), "beamload");
-    _rgbDisplayProg = linkShaderProgram(loadBundledShader(@"okusan-crt-display"), "display-rgb");
-    _rfDisplayProg = linkShaderProgram(loadBundledShader(@"okusan-crt-rf-display"), "display-rf");
-    _bwDisplayProg = linkShaderProgram(loadBundledShader(@"okusan-crt-bw-display"), "display-bw");
+    _beamLoadProg = crt_gl::linkBundledShaderProgram(@"okusan-crt-beamload", "beamload");
+    _rgbDisplayProg = crt_gl::linkBundledShaderProgram(@"okusan-crt-display", "display-rgb");
+    _rfDisplayProg = crt_gl::linkBundledShaderProgram(@"okusan-crt-rf-display", "display-rf");
+    _bwDisplayProg = crt_gl::linkBundledShaderProgram(@"okusan-crt-bw-display", "display-bw");
 
-    _currentFrameTex = createFrameTexture();
-    _previousFrameTex = createFrameTexture();
+    for (int i = 0; i < 4; ++i) {
+        _frameRingTex[i] = crt_gl::createFrameTexture();
+    }
+    _frameRingIdx = 0;
+    _curTex = _frameRingTex[0];
+    _prevTex = _frameRingTex[3];
+    for (int e = 0; e < 2; ++e) {
+        for (int b = 0; b < 2; ++b) {
+            _eyeRingTex[e][b] = 0;
+        }
+        _eyeRingIdx[e] = 0;
+    }
+    _eyeLeftTex = 0;
+    _eyeRightTex = 0;
 
     glGenTextures(1, &_beamLoadTex);
     glBindTexture(GL_TEXTURE_2D, _beamLoadTex);
@@ -374,7 +313,7 @@ GLuint createFrameTexture() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F_ARB, 32, 32, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F_ARB, 1, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
 
     glGenFramebuffersEXT(1, &_beamLoadFbo);
     glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, _beamLoadFbo);
@@ -410,26 +349,78 @@ GLuint createFrameTexture() {
     if (!_core) return;
     [self ensureGLReady];
     [self.openGLContext makeCurrentContext];
-    std::swap(_currentFrameTex, _previousFrameTex);
-    [self uploadTopDownPixels:_core->currentPixels()
-                    toTexture:_currentFrameTex
-                        width:_core->width()
-                       height:_core->height()];
+    const unsigned width = _core->width();
+    const unsigned height = _core->height();
+    [self pushRingFramePixels:_core->currentPixels() width:width height:height];
+    if (_core->is3dSystemActive() && !_flipBuffer.empty()) {
+        if (!_eyeRingTex[0][0]) {
+            for (int e = 0; e < 2; ++e) {
+                for (int b = 0; b < 2; ++b) {
+                    _eyeRingTex[e][b] = crt_gl::createFrameTexture();
+                }
+            }
+            _eyeLeftTex = _eyeRingTex[0][0];
+            _eyeRightTex = _eyeRingTex[1][0];
+        }
+        const int eye = _core->current3dEye() & 1;
+        _last3dRawEye = eye;
+        const int nextSlot = 1 - _eyeRingIdx[eye];
+        _eyeRingIdx[eye] = nextSlot;
+        GLuint eyeTex = _eyeRingTex[eye][nextSlot];
+        if (eye == 0) _eyeLeftTex = eyeTex;
+        else          _eyeRightTex = eyeTex;
+        glBindTexture(GL_TEXTURE_2D, eyeTex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)width, (GLsizei)height,
+                        GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, _flipBuffer.data());
+    }
     ++_frameCounter;
     [self setNeedsDisplay:YES];
 }
 
 - (void)clearToBlack {
     if (!_core) return;
-    [self ensureGLReady];
-    [self.openGLContext makeCurrentContext];
     const unsigned width = std::max(_core->width(), 256u);
     const unsigned height = std::max(_core->height(), 240u);
     std::vector<uint32_t> black(static_cast<size_t>(width) * height, 0xFF000000u);
-    [self uploadTopDownPixels:black.data() toTexture:_currentFrameTex width:width height:height];
-    [self uploadTopDownPixels:black.data() toTexture:_previousFrameTex width:width height:height];
+    [self pushRingPairPrev:black.data() cur:black.data() width:width height:height];
+    for (int e = 0; e < 2; ++e) {
+        for (int b = 0; b < 2; ++b) {
+            if (_eyeRingTex[e][b]) {
+                [self uploadTopDownPixels:black.data() toTexture:_eyeRingTex[e][b] width:width height:height];
+            }
+        }
+    }
     ++_frameCounter;
     [self setNeedsDisplay:YES];
+}
+
+- (void)showStatusBannerText:(NSString *)text {
+    if (!text || text.length == 0) return;
+    _banner.show(text);
+    [self setNeedsDisplay:YES];
+}
+
+- (void)show3dModeBanner {
+    NSString *label = @"";
+    switch (_view3dMode) {
+        case Famicom3dViewMode::ShutterGlasses:
+            label = app_l10n::tr(@"3D スコープ (HVC-031実機)", @"3D Scope (HVC-031 Shutter)");
+            break;
+        case Famicom3dViewMode::ParallelSbs:
+            label = app_l10n::tr(@"3D 並行視 (ステレオ)", @"3D Parallel View (Stereo)");
+            break;
+        case Famicom3dViewMode::CrossSbs:
+            label = app_l10n::tr(@"3D 交差視 (L/R反転)", @"3D Cross-Eyed View");
+            break;
+        case Famicom3dViewMode::NakedCrt:
+        default:
+            label = app_l10n::tr(@"3D 裸眼 (生CRT 60Hz)", @"3D Off (Raw 60Hz CRT)");
+            break;
+    }
+    if (_invert3dEyes) {
+        label = [label stringByAppendingString:app_l10n::tr(@" [L/R入替]", @" [Swap L/R]")];
+    }
+    [self showStatusBannerText:label];
 }
 
 - (void)advanceTvRasterFrame {
@@ -470,23 +461,12 @@ GLuint createFrameTexture() {
         _hudCachedJammed = jammed;
         _hudNeedsRefresh = NO;
 
-        glActiveTexture(GL_TEXTURE0);
-        if (!_hudTex) {
-            glGenTextures(1, &_hudTex);
-            glBindTexture(GL_TEXTURE_2D, _hudTex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                         cart_hud::kHudBitmapWidth, cart_hud::kHudBitmapHeight,
-                         0, GL_RGBA, GL_UNSIGNED_BYTE, _hudBitmap.data());
-        } else {
-            glBindTexture(GL_TEXTURE_2D, _hudTex);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                            cart_hud::kHudBitmapWidth, cart_hud::kHudBitmapHeight,
-                            GL_RGBA, GL_UNSIGNED_BYTE, _hudBitmap.data());
-        }
+        const bool recreate = (!_hudTex);
+        crt_gl::uploadOrUpdateRgbaTexture(_hudTex,
+                                          cart_hud::kHudBitmapWidth,
+                                          cart_hud::kHudBitmapHeight,
+                                          _hudBitmap.data(),
+                                          recreate);
     } else {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, _hudTex);
@@ -499,34 +479,7 @@ GLuint createFrameTexture() {
     const float originY = margin + (float)backingH * 0.02f;
     _hudBackingRect = CGRectMake(originX, originY, drawW, drawH);
 
-    glViewport(0, 0, backingW, backingH);
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    glOrtho(0, backingW, 0, backingH, -1, 1);
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
-
-    glEnable(GL_TEXTURE_2D);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4f(alpha, alpha, alpha, alpha);
-
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 1.0f); glVertex2f(originX, originY);
-    glTexCoord2f(1.0f, 1.0f); glVertex2f(originX + drawW, originY);
-    glTexCoord2f(1.0f, 0.0f); glVertex2f(originX + drawW, originY + drawH);
-    glTexCoord2f(0.0f, 0.0f); glVertex2f(originX, originY + drawH);
-    glEnd();
-
-    glDisable(GL_BLEND);
-    glDisable(GL_TEXTURE_2D);
-    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
+    crt_gl::drawOrthoTexturedQuad(_hudTex, backingW, backingH, originX, originY, drawW, drawH, alpha, true);
 }
 
 - (BOOL)acceptsFirstResponder {
@@ -621,24 +574,127 @@ GLuint createFrameTexture() {
     *outPowerJitter = powerJitter;
 }
 
-- (void)renderBeamLoadPassWithInputW:(float)inputW inputH:(float)inputH {
+- (void)renderBeamLoadPassWithMainTex:(GLuint)mainTex
+                              prevTex:(GLuint)prevTex
+                               inputW:(float)inputW
+                               inputH:(float)inputH {
     glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, _beamLoadFbo);
-    glViewport(0, 0, 32, 32);
-    glUseProgram(_beamLoadProg);
-    uploadIdentityMvp(_beamLoadProg);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, _currentFrameTex);
-    glUniform1i(glGetUniformLocation(_beamLoadProg, "OrigTexture"), 0);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, _previousFrameTex);
-    glUniform1i(glGetUniformLocation(_beamLoadProg, "PrevTexture"), 1);
-    glUniform2f(glGetUniformLocation(_beamLoadProg, "OrigInputSize"), inputW, inputH);
-    glUniform2f(glGetUniformLocation(_beamLoadProg, "OrigTextureSize"), 512.0f, 256.0f);
-    glUniform2f(glGetUniformLocation(_beamLoadProg, "PrevInputSize"), inputW, inputH);
-    glUniform2f(glGetUniformLocation(_beamLoadProg, "PrevTextureSize"), 512.0f, 256.0f);
-    drawFullscreenQuad();
+    glViewport(0, 0, 1, 1);
+    glUseProgram(_beamLoadProg.prog);
+    crt_gl::uploadIdentityMvp(_beamLoadProg);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, mainTex);
+    crt_gl::setUniform1i(_beamLoadProg.origTexture, 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, prevTex);
+    crt_gl::setUniform1i(_beamLoadProg.prevTexture, 1);
+    crt_gl::setUniform2f(_beamLoadProg.origInputSize, inputW, inputH);
+    crt_gl::setUniform2f(_beamLoadProg.origTextureSize, 512.0f, 256.0f);
+    crt_gl::setUniform2f(_beamLoadProg.prevInputSize, inputW, inputH);
+    crt_gl::setUniform2f(_beamLoadProg.prevTextureSize, 512.0f, 256.0f);
+    crt_gl::drawFullscreenQuad();
+}
+
+- (void)computeSbsViewportsForWidth:(GLsizei)backingW
+                             height:(GLsizei)backingH
+                           parallel:(BOOL)isParallel
+                            outLeft:(NSRect *)leftRect
+                           outRight:(NSRect *)rightRect {
+    const float scale = (self.bounds.size.width > 1.0)
+                            ? std::max(1.0f, static_cast<float>(backingW) / static_cast<float>(self.bounds.size.width))
+                            : 1.0f;
+    const double gap = 22.0 * scale;
+    const double marginX = 24.0 * scale;
+    const double marginY = 20.0 * scale;
+    double maxPairW = std::max(120.0, static_cast<double>(backingW) - marginX * 2.0);
+    if (isParallel) {
+        maxPairW = std::min(maxPairW, 640.0 * scale);
+    }
+    const double maxPairH = std::max(90.0, static_cast<double>(backingH) - marginY * 2.0);
+    double eyeW = (maxPairW - gap) * 0.5;
+    double eyeH = eyeW * (3.0 / 4.0);
+    if (eyeH > maxPairH) {
+        eyeH = maxPairH;
+        eyeW = eyeH * (4.0 / 3.0);
+    }
+    const double totalW = eyeW * 2.0 + gap;
+    const double startX = (static_cast<double>(backingW) - totalW) * 0.5;
+    const double startY = (static_cast<double>(backingH) - eyeH) * 0.5;
+    *leftRect = NSMakeRect(startX, startY, eyeW, eyeH);
+    *rightRect = NSMakeRect(startX + eyeW + gap, startY, eyeW, eyeH);
+}
+
+- (void)renderSingleCrtPassWithMainTex:(GLuint)mainTex
+                               prevTex:(GLuint)prevTex
+                             viewportX:(GLint)viewX
+                             viewportY:(GLint)viewY
+                             viewportW:(GLsizei)viewW
+                             viewportH:(GLsizei)viewH
+                                inputW:(float)inputW
+                                inputH:(float)inputH
+                           cartPowered:(BOOL)cartPowered
+                       shutterOverlay:(BOOL)shutterOverlay
+                          shutterPhase:(int)shutterPhase {
+    [self renderBeamLoadPassWithMainTex:mainTex prevTex:prevTex inputW:inputW inputH:inputH];
+
+    if (!_displayConfig.rfMode && (!cartPowered || !_consolePowered)) {
+        glUseProgram(0);
+        return;
+    }
+
+    const GLsizei safeW = std::max(viewW, 1);
+    const GLsizei safeH = std::max(viewH, 1);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    glViewport(viewX, viewY, safeW, safeH);
+
+    const CrtShaderProgram *displayProg = &_rgbDisplayProg;
+    if (_displayConfig.rfMode) {
+        displayProg = (_displayConfig.monochrome && _bwDisplayProg.prog) ? &_bwDisplayProg : &_rfDisplayProg;
+    }
+    if (displayProg && displayProg->prog) {
+        glUseProgram(displayProg->prog);
+        crt_gl::uploadIdentityMvp(*displayProg);
+
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, _beamLoadTex);
+        crt_gl::setUniform1i(displayProg->texture, 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, mainTex);
+        crt_gl::setUniform1i(displayProg->origTexture, 1);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, prevTex);
+        crt_gl::setUniform1i(displayProg->prevTexture, 2);
+
+        crt_gl::setUniform2f(displayProg->inputSize, 1.0f, 1.0f);
+        crt_gl::setUniform2f(displayProg->textureSize, 1.0f, 1.0f);
+        crt_gl::setUniform2f(displayProg->origInputSize, inputW, inputH);
+        crt_gl::setUniform2f(displayProg->origTextureSize, 512.0f, 256.0f);
+        crt_gl::setUniform2f(displayProg->outputSize, (float)safeW, (float)safeH);
+        crt_gl::setUniform1i(displayProg->frameCount, _frameCounter);
+
+        crt_gl::setUniform1f(displayProg->interlaced, _displayConfig.interlaced ? 1.0f : 0.0f);
+        crt_gl::setUniform1f(displayProg->hvBloom, _displayConfig.hvBloom);
+        crt_gl::setUniform1f(displayProg->curvature, _displayConfig.curvature);
+        crt_gl::setUniform1f(displayProg->maskStrength, _displayConfig.slotMask);
+
+        if (_displayConfig.rfMode) {
+            float standbySnow = 0.0f;
+            float powerJitter = 0.0f;
+            [self computeRfStandby:&standbySnow jitter:&powerJitter cartPowered:cartPowered];
+            crt_gl::setUniform1f(displayProg->rfSnow, _displayConfig.rfSnow);
+            crt_gl::setUniform1f(displayProg->rfSignal, _displayConfig.rfSignal);
+            crt_gl::setUniform1f(displayProg->rfStandbySnow, standbySnow);
+            crt_gl::setUniform1f(displayProg->powerJitter, powerJitter);
+        }
+
+        crt_gl::drawFullscreenQuad();
+        glUseProgram(0);
+    }
+
+    if (shutterOverlay) {
+        // Real HVC-031 TN-LCD polarizer light loss (~42% transmittance + subtle cool slate tint & 30Hz pulse)
+        const float pulseDim = (shutterPhase & 1) ? 0.44f : 0.36f;
+        crt_gl::drawColorOverlayQuad(0.05f, 0.07f, 0.09f, pulseDim);
+    }
 }
 
 - (void)renderFrameAtBackingWidth:(GLsizei)backingW height:(GLsizei)backingH {
-    if (!_glInitialized || !_beamLoadProg || !_core) {
+    if (!_glInitialized || !_beamLoadProg.prog || !_core) {
         glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
         glViewport(0, 0, backingW, backingH);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -653,65 +709,67 @@ GLuint createFrameTexture() {
 
     const float inputW = (float)_core->width();
     const float inputH = (float)_core->height();
-    [self renderBeamLoadPassWithInputW:inputW inputH:inputH];
-
     const BOOL cartPowered = _core->isLoaded() && _core->isCartridgePowered();
+
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    glViewport(0, 0, backingW, backingH);
     if (!_displayConfig.rfMode && (!cartPowered || !_consolePowered)) {
-        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
-        glViewport(0, 0, backingW, backingH);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
     } else {
-        const GLsizei safeW = std::max(viewW, 1);
-        const GLsizei safeH = std::max(viewH, 1);
-        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
-        glViewport(0, 0, backingW, backingH);
         glClearColor(0.004f, 0.006f, 0.008f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        glViewport(viewX, viewY, safeW, safeH);
+    }
+    glClear(GL_COLOR_BUFFER_BIT);
 
-        GLuint displayProg = _rgbDisplayProg;
-        if (_displayConfig.rfMode) {
-            displayProg = (_displayConfig.monochrome && _bwDisplayProg) ? _bwDisplayProg : _rfDisplayProg;
-        }
-        if (displayProg) {
-            glUseProgram(displayProg);
-            uploadIdentityMvp(displayProg);
+    const bool useSbs = _core->is3dSystemActive() &&
+                        (_view3dMode == Famicom3dViewMode::ParallelSbs ||
+                         _view3dMode == Famicom3dViewMode::CrossSbs);
+    if (useSbs) {
+        const BOOL isParallel = (_view3dMode == Famicom3dViewMode::ParallelSbs);
+        NSRect lRect = NSZeroRect, rRect = NSZeroRect;
+        [self computeSbsViewportsForWidth:backingW height:backingH parallel:isParallel outLeft:&lRect outRight:&rRect];
 
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, _beamLoadTex);
-            glUniform1i(glGetUniformLocation(displayProg, "Texture"), 0);
-            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, _currentFrameTex);
-            glUniform1i(glGetUniformLocation(displayProg, "OrigTexture"), 1);
-            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, _previousFrameTex);
-            glUniform1i(glGetUniformLocation(displayProg, "PrevTexture"), 2);
+        const GLuint logicalLeft = _invert3dEyes ? _eyeRightTex : _eyeLeftTex;
+        const GLuint logicalRight = _invert3dEyes ? _eyeLeftTex : _eyeRightTex;
+        const GLuint screenLeftMain = isParallel ? logicalLeft : logicalRight;
+        const GLuint screenRightMain = isParallel ? logicalRight : logicalLeft;
 
-            glUniform2f(glGetUniformLocation(displayProg, "InputSize"), 32.0f, 32.0f);
-            glUniform2f(glGetUniformLocation(displayProg, "TextureSize"), 32.0f, 32.0f);
-            glUniform2f(glGetUniformLocation(displayProg, "OrigInputSize"), inputW, inputH);
-            glUniform2f(glGetUniformLocation(displayProg, "OrigTextureSize"), 512.0f, 256.0f);
-            glUniform2f(glGetUniformLocation(displayProg, "OutputSize"), (float)safeW, (float)safeH);
-            glUniform1i(glGetUniformLocation(displayProg, "FrameCount"), _frameCounter);
+        [self renderSingleCrtPassWithMainTex:screenLeftMain
+                                     prevTex:screenRightMain
+                                   viewportX:(GLint)std::llround(lRect.origin.x)
+                                   viewportY:(GLint)std::llround(lRect.origin.y)
+                                   viewportW:(GLsizei)std::llround(lRect.size.width)
+                                   viewportH:(GLsizei)std::llround(lRect.size.height)
+                                      inputW:inputW inputH:inputH
+                                 cartPowered:cartPowered
+                             shutterOverlay:NO
+                                shutterPhase:0];
 
-            glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_INTERLACED"), _displayConfig.interlaced ? 1.0f : 0.0f);
-            glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_HV_BLOOM"), _displayConfig.hvBloom);
-            glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_CURVATURE"), _displayConfig.curvature);
-            glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_MASK_STRENGTH"), _displayConfig.slotMask);
-
-            if (_displayConfig.rfMode) {
-                float standbySnow = 0.0f;
-                float powerJitter = 0.0f;
-                [self computeRfStandby:&standbySnow jitter:&powerJitter cartPowered:cartPowered];
-                glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_RF_SNOW"), _displayConfig.rfSnow);
-                glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_RF_SIGNAL"), _displayConfig.rfSignal);
-                glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_RF_STANDBY_SNOW"), standbySnow);
-                glUniform1f(glGetUniformLocation(displayProg, "OKUSAN_POWER_JITTER"), powerJitter);
-            }
-
-            drawFullscreenQuad();
-            glUseProgram(0);
-        }
+        [self renderSingleCrtPassWithMainTex:screenRightMain
+                                     prevTex:screenLeftMain
+                                   viewportX:(GLint)std::llround(rRect.origin.x)
+                                   viewportY:(GLint)std::llround(rRect.origin.y)
+                                   viewportW:(GLsizei)std::llround(rRect.size.width)
+                                   viewportH:(GLsizei)std::llround(rRect.size.height)
+                                      inputW:inputW inputH:inputH
+                                 cartPowered:cartPowered
+                             shutterOverlay:NO
+                                shutterPhase:0];
+    } else {
+        const BOOL scopeActive = _core->is3dSystemActive() && (_view3dMode == Famicom3dViewMode::ShutterGlasses);
+        const int effPhase = _invert3dEyes ? (1 - (_last3dRawEye & 1)) : (_last3dRawEye & 1);
+        [self renderSingleCrtPassWithMainTex:_curTex
+                                     prevTex:_prevTex
+                                   viewportX:viewX
+                                   viewportY:viewY
+                                   viewportW:viewW
+                                   viewportH:viewH
+                                      inputW:inputW inputH:inputH
+                                 cartPowered:cartPowered
+                             shutterOverlay:scopeActive
+                                shutterPhase:effPhase];
     }
 
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
     if (_hudPinned) {
         [self drawConnectorHudAtWidth:backingW height:backingH alpha:1.0f];
     } else {
@@ -723,6 +781,11 @@ GLuint createFrameTexture() {
             }
         }
     }
+
+    const float backingScale = (self.bounds.size.width > 1.0)
+                                 ? static_cast<float>(backingW) / static_cast<float>(self.bounds.size.width)
+                                 : 1.0f;
+    _banner.draw(backingW, backingH, backingScale);
 }
 
 - (void)drawRect:(NSRect)dirtyRect {

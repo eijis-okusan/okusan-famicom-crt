@@ -1,11 +1,11 @@
-# おくさんファミコン (Okusan Famicom CRT) `v0.5`
+# おくさんファミコン (Okusan Famicom CRT) `v0.6`
 
 [English](README.md) | **日本語 (Japanese)**
 
-1980年代の家庭用 **14型ブラウン管テレビ**（VHF 300Ω RF 接続・小口径モノラルスピーカー・単一電子銃 白黒P4モード）と、ファミコンカセット60ピンの **「斜め差し接触不良」** を物理・電気レベルで再現した macOS 用ファミコン／NES プレイヤーです。
+1980年代の家庭用 **14型ブラウン管テレビ**（VHF 300Ω RF 接続・小口径モノラルスピーカー・単一電子銃 白黒P4モード）と、ファミコンカセット60ピンの **「斜め差し接触不良」**、**ファミコン3Dシステム（HVC-031）表示モード**、および **ディスクシステム（HVC-022）ドライブ＆エラー再現** を統合した macOS 用ファミコン／NES プレイヤーです。
 
-> **ROM データは一切同梱していません。**  
-> ROM 未挿入で起動すると、昔のテレビにカセットを挿さずに電源を入れたときのような **無信号 RF 砂嵐待機** から始まります。`.nes` ファイルをウィンドウへドラッグ＆ドロップするか `Cmd + O` で開くと、カセットが挿入されて本体電源が入ります。
+> **ROM データおよび FDS BIOS（`disksys.rom`）は一切同梱していません。**  
+> ROM 未挿入で起動すると、昔のテレビにカセットを挿さずに電源を入れたときのような **無信号 RF 砂嵐待機** から始まります。`.nes` / `.fds` / BIOS ファイルをウィンドウへドラッグ＆ドロップするか `Cmd + O` で開くと、本体電源が入ります。
 
 ---
 
@@ -25,9 +25,9 @@
 
 ## 主な特徴と技術解説
 
-### 1. 2-Pass GLSL ブラウン管パイプライン（`src/video/`, `resources/shaders/`）
+### 1. 2-Pass GLSL ブラウン管パイプライン＆ VSync 同期（`src/video/`, `resources/shaders/`）
 
-映像はまず **Pass 0**（[`okusan-crt-beamload.glsl`](resources/shaders/okusan-crt-beamload.glsl)）で現フレームと前フレームの Rec.601 輝度二乗値を 32×32 `RGBA16F` FBO へ縮小平滑化してカソードビーム負荷とフライバック高圧低下を推定し、続いて 3 種類の **Pass 1** シェーダのいずれかへ出力します。
+映像はまず **Pass 0**（[`okusan-crt-beamload.glsl`](resources/shaders/okusan-crt-beamload.glsl)）で現フレームと前フレームの Rec.601 輝度二乗値を `1×1 RGBA16F` FBO へ縮小平滑化（4 枚構成 GL テクスチャリング＋Uniform ロケーションキャッシュ使用）してカソードビーム負荷とフライバック高圧低下を推定し、続いて 3 種類の **Pass 1** シェーダのいずれかへ出力します。フレーム同期は `EmulationPacer`（`CADisplayLink` による 60 Hz 1:1 / 120 Hz ProMotion 1:2 ロック＋`NSActivityLatencyCritical` 指定）と `MacAudioEngine` 側の Dynamic Rate Control（DRC）により、スクロール時の引っかかりや音割れを抑えています。
 
 - **RGB モニター**（[`okusan-crt-display.glsl`](resources/shaders/okusan-crt-display.glsl), `Cmd + 1`）
   - くっきりした RGB 入力に対し、管面曲率・スロットマスク・480i 交互フィールド走査線／240p切替・微細な3電子銃コンバージェンスずれ・ガラス内面ハレーション・HV ブルームを適用します。
@@ -64,6 +64,21 @@ RF モード時は APU ステレオ出力をモノラル合成し、[`TvSpeakerD
     - 故障姿勢から **`/`（`?`）** で一気に差し直した瞬間のみ、本体内 2 KB `CIRAM`（`NTARAM`）へ 1 ショットの誤ラッチが焼き付き、「正常に戻してもその画面の壊れた背景だけしばらく残る」実機特有の現象を再現します。
 - **対話型 1:1 mm HUD（`\` キーまたはクリックで固定）**: 青ソケット断面・接点重なり・隙間・`Vcc`・`[弱/怪/断/隣]` 集計・全 60 ピンのリアルタイム High 率バーとシアン `XTALK` 線を表示し、任意のピンをクリックして `$orig -> 実効 $eff` バス値をライブ監視できます。
 - 計算式・全 60 ピン詳細表：[`docs/60pin-hardware-notes.md`](docs/60pin-hardware-notes.md)（[English Spec](docs/60pin-hardware-notes.en.md)）
+
+### 4. ファミコン 3D システム（HVC-031 / `$4016 OUT1`）
+
+ゲーム側が `$4016` bit 1（`OUT1`）で左右眼シャッターを交互に駆動すると、`ppu.c` が走査線 120 付近（およびフレーム内パルス）で 3D 駆動を自動検出し、**CRT ディスプレイ → ファミコン3Dシステム (`G`)** サブメニューを有効化します。
+
+- **裸眼 (生CRT 60Hz交互表示 / 既定値)**: 暗転やシャッター減光を入れず、生の 60 Hz CRT 映像のまま表示します。
+- **3Dスコープ実機 (HVC-031 液晶+残像)**: TN 液晶シャッターの透過率低下（約 42%）と 30 Hz 交互駆動の明滅を再現します。
+- **並行視 (SBS 最大65mm IPD制限)**: 左右の CRT 画面を並べ、裸眼並行視向けに瞳孔間距離（65 mm 相当上限）を抑えて配置します。
+- **交差視 (SBS L/R反転)**: 交差視向けに左右画面を反転配置します（メニューから **左右 (L/R) 映像を入れ替える** の個別反転も可能）。
+
+### 5. ディスクシステム（HVC-022 / ユーザー準備 BIOS）
+
+- **BIOS 同梱なし（自動登録）**: 本アプリ・リポジトリには `disksys.rom` などの著作権保護された BIOS を一切同梱していません。ご自身で吸い出した正規 BIOS（8 KB / 16 KB / iNES ヘッダ付き、`*NINTENDO-HVC*` 検証済み）を `Cmd + O` やドラッグ＆ドロップで一度開くと BIOS スタンバイ起動と同時に `~/Library/Application Support/Okusan-Famicom-CRT-Player/disksys.rom` へ自動登録され、以降は `.fds` を直接開けます。
+- **ドライブ操作＆差分セーブ**: BIOS スタンバイ中からの `.fds` ホットスワップ、裏返し（`C`）、抜き出し（`E`）、片面挿入（`1`〜`4`／メニューからは最大 8 面）、および元イメージを書き換えない XOR 差分セーブ（`fds_diff_<name>.ofds`）に対応します。
+- **ランダム読込エラー再現（`T`）**: ディスク半挿し・電池低下・ボリューム/ブロックヘッダ異常・CRC エラーなど実機準拠の **ERR. 01〜28**（9 種類）をランダム発生させます（`R` リセットでエラー解除）。
 
 ---
 
@@ -111,12 +126,12 @@ make distclean   # build/ と third_party/fceumm の生成物を全削除
 
 ## 使い方・操作一覧
 
-### ROM の読み込みと履歴
+### ROM・ディスクの読み込みと履歴
 
-- `.nes` ファイルをウィンドウへドラッグ＆ドロップするか、**エミュレータ → NES ROM を開く...**（`Cmd + O`）、または CLI 第 1 引数に ROM パスを渡して起動できます。
-- 起動成功した ROM は **直近 10 本** まで `NSUserDefaults`（`recentRoms`）に保存され、メニューバーの **履歴 / History** からワンクリックで起動できます（**履歴をクリア** で消去）。
-- クイックセーブ（`F5`）／ロード（`F8`）のステートファイルは以下に保存されます：  
-  `~/Library/Application Support/Okusan-Famicom-CRT-Player/quickstate_<rom_name>.ss`
+- `.nes` / `.fds` / お手持ちの FDS BIOS（`.rom` / `.bin` / `.nes`）ファイルをウィンドウへドラッグ＆ドロップするか、**エミュレータ → ROM / .fds を開く...**（`Cmd + O`）、または CLI 第 1 引数にパスを渡して起動できます。
+- 起動成功した ROM / ディスクは **直近 10 本** まで `NSUserDefaults`（`recentRoms`）に保存され、メニューバーの **履歴 / History** からワンクリックで起動できます（**履歴をクリア** で消去）。
+- クイックセーブ（`F5`）／ロード（`F8`）および FDS 差分セーブデータ（`.ofds`）は以下に保存されます：  
+  `~/Library/Application Support/Okusan-Famicom-CRT-Player/`
 
 ### キーボード＆カセット操作
 
@@ -133,14 +148,16 @@ make distclean   # build/ と third_party/fceumm の生成物を全削除
 | `\`（または HUD クリック） | 60ピン接点 HUD の常時表示ピン留め切替（JIS の `¥` も可） |
 | `O` | ファミコン本体電源 ON / OFF |
 | `@` | 電源 ON 中はスイッチ OFF／OFF から押すと全60ピンランダム接触不良起動＋HUD表示 |
-| `R`（単押し／長押し） | リセット（押している間は音声ミュート＆画面遮断） |
+| `R`（単押し／長押し） | リセット（押している間は音声ミュート＆画面遮断。FDS エラー状態も解除） |
 | `F` | 接触フリーズ ON / OFF |
+| `G` | 3D システム表示モード切替（`裸眼 60Hz` → `3Dスコープ` → `並行視` → `交差視`） |
+| `C` / `E` / `1–4` / `T` | FDS ディスク：裏返し / 抜く / 面挿入（1〜4） / ランダム読込エラー再現 |
 | `P` | 一時停止 / 再開 |
 | `F5` / `F8` | クイックセーブ / クイックロード |
 | `Cmd + 1` / `2` / `3` | RGB モニター / カラー RF / 白黒 RF テレビ切替 |
 | `Cmd + I` / `B` / `C` / `K` | 480i/240p・HV ブルーム・管面曲率・スロットマスク切替 |
 | `Cmd + M` / `Cmd + F` | ミュート / フルスクリーン切替 |
-| `Cmd + O` / `Cmd + ,` | NES ROM を開く / コントローラ設定ウィンドウ |
+| `Cmd + O` / `Cmd + ,` | ROM / .fds を開く / コントローラ設定ウィンドウ |
 
 ### ゲームパッド対応
 
@@ -162,19 +179,19 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
 
 ```text
   FCEUmm コア (third_party/fceumm/src/)
-   ├─ x6502.c / ppu.c / pputile.h  <── 60ピンバスフック ──>  okusan_cart.c / okusan_cart.h
-   │                                                          (3軸幾何・Vcc降下・XTALK・解析計測)
-   ▼ (256x240 RGB565 映像 / 48 kHz APU PCM / 60ピン状態)
+   ├─ x6502.c / ppu.c / pputile.h / input.c / fds.c  <── フック ──>  okusan_cart.c / okusan_cart.h
+   │   (3軸幾何・Vcc降下・XTALK・$4016 3Dシャッター・HVC-022 FDS ドライブ＆ERR.01〜28故障)
+   ▼ (256x240 映像 / 48 kHz APU PCM / 60ピン・3D・FDS 状態)
   C++17 コア制御層 (src/core/, Cocoa 非依存)
-   ├─ FamicomCore              (libretro ローダ・実行/リセット・ステート・60ピンAPI)
+   ├─ FamicomCore              (libretro ローダ・実行/リセット・ステート・60ピン/3D/FDS API)
    └─ CartridgeFaultInjector   (コールドブート 60ピン接触不良生成＆起動検証)
    ▼
   macOS UI・描画・音響層 (src/{app,audio,video,hud,input}/)
-   ├─ AppDelegate + AppMenuController + AppPreferences + LicensesWindow + AppLocalization
-   ├─ CrtScreenView + FreezeFrameGenerator + GLSL シェーダ (2-pass ビーム負荷＆CRT/RF/P4)
+   ├─ AppDelegate + AppMenuController + AppPreferences + EmulationPacer + LicensesWindow + AppLocalization
+   ├─ CrtScreenView + CrtShaderProgram + StatusBanner + FreezeFrameGenerator + GLSL シェーダ (1x1 Pass0 & CRT/RF/P4/3D)
    ├─ CartConnectorHud         (1:1 mm ソケット断面図＆ライブピン監視)
-   ├─ MacAudioEngine + TvSpeakerDsp.hpp (CoreAudio ＋ 小口径紙コーンEQ／インターキャリアバズ)
-   └─ InputBindings + ControllerSettingsWindow (キーボード ＋ GameController)
+   ├─ MacAudioEngine + TvSpeakerDsp.hpp (CoreAudio DRC ＋ 小口径紙コーンEQ／インターキャリアバズ)
+   └─ InputBindings + InputPoller + ControllerSettingsWindow (キーボード ＋ GameController)
 ```
 
 ### ディレクトリ構成
@@ -190,16 +207,16 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
 ├── resources/
 │   ├── shaders/                    # 2-pass GLSL 1.20 CRT / RF / 白黒 P4 シェーダ
 │   ├── AppIcon.icns                # macOS アプリアイコン
-│   └── Info.plist                  # バンドル情報（v0.5）
+│   └── Info.plist                  # バンドル情報（v0.6）
 ├── src/
-│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, LicensesWindow, AppLocalization
-│   ├── core/                       # FamicomCore & CartridgeFaultInjector（標準 C++17 の libretro ローダ＆60ピンAPI）
-│   ├── audio/                      # TvSpeakerDsp.hpp（標準 C++17）と MacAudioEngine（CoreAudio 出力）
-│   ├── video/                      # FreezeFrameGenerator（標準 C++17）と CrtScreenView（OpenGL 2-pass CRT 描画）
+│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, EmulationPacer, LicensesWindow, AppLocalization
+│   ├── core/                       # FamicomCore & CartridgeFaultInjector（標準 C++17 の libretro/60ピン/3D/FDS API）
+│   ├── audio/                      # TvSpeakerDsp.hpp（標準 C++17）と MacAudioEngine（CoreAudio + DRC）
+│   ├── video/                      # FreezeFrameGenerator（標準 C++17）, CrtScreenView, CrtShaderProgram, StatusBanner
 │   ├── hud/                        # CartConnectorHud（CoreGraphics 1:1 mm コネクタ＆解析UI）
-│   └── input/                      # InputBindings と ControllerSettingsWindow
+│   └── input/                      # InputBindings, InputPoller, ControllerSettingsWindow
 ├── third_party/
-│   └── fceumm/                     # 60ピン物理・CPU/PPU バスフックを組み込んだ FCEUmm コア（okusan_cart.c/.h 等）
+│   └── fceumm/                     # 60ピン物理・3Dシャッター・FDS・CPU/PPU フックを組み込んだ FCEUmm コア
 ├── LICENSE                         # GNU General Public License v2.0
 ├── Makefile
 ├── README.md
@@ -214,7 +231,7 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
 
 本リポジトリは改変版の **[libretro-fceumm](https://github.com/libretro/libretro-fceumm)** を統合しており、全体として **GNU General Public License v2.0**（[`LICENSE`](LICENSE)）の下で公開します。
 
-- **FCEUmm (libretro)** — FCE Ultra / FCEU-mm ベースの NES/ファミコンエミュレーションコア（Xodnizel, CaH4e3, BERO, libretro contributors / GNU GPL v2.0。`src/okusan_cart.h`, `src/okusan_cart.c`, `Makefile.common`, `src/ppu.c`, `src/ppu.h`, `src/pputile.h`, `src/x6502.c` に 60ピン物理・バスフックを追加）
+- **FCEUmm (libretro)** — FCE Ultra / FCEU-mm ベースの NES/ファミコンエミュレーションコア（Xodnizel, CaH4e3, BERO, libretro contributors / GNU GPL v2.0。`src/okusan_cart.h`, `src/okusan_cart.c`, `Makefile.common`, `src/ppu.c`, `src/ppu.h`, `src/pputile.h`, `src/x6502.c`, `src/fceu.c`, `src/fds.c`, `src/fds.h`, `src/input.c` を拡張）
 - **libretro API & libretro-common** — `third_party/fceumm` に内包（MIT License）
 - **nes_ntsc**（Shay Green / Blargg）・**EMU2413**（Mitsutaka Okazaki）— `third_party/fceumm` に内包
 

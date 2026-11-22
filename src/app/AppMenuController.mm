@@ -1,7 +1,10 @@
 #import "app/AppMenuController.hpp"
 #import "app/AppLocalization.hpp"
+#import "core/FamicomCore.hpp"
 #import "input/InputBindings.hpp"
 #import "video/CrtScreenView.hpp"
+
+#include <algorithm>
 
 namespace {
 
@@ -31,6 +34,22 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     NSMenuItem *_menuLangSystem;
     NSMenuItem *_menuLangJapanese;
     NSMenuItem *_menuLangEnglish;
+
+    NSMenuItem *_menu3dItem;
+    NSMenuItem *_mode3dItems[4];
+    NSMenuItem *_invert3dEyesItem;
+
+    NSMenuItem *_diskTopItem;
+    NSMenu *_diskMenu;
+    NSMenuItem *_diskFlipItem;
+    NSMenuItem *_diskEjectItem;
+    NSMenuItem *_diskInsertSideItems[8];
+    NSMenuItem *_diskFaultItem;
+
+    BOOL _lastMenu3dActive;
+    BOOL _lastMenuFdsActive;
+    int _lastMenuFdsInserted;
+    int _lastMenuFdsSides;
 }
 
 - (NSMenuItem *)buildApplicationMenuWithTarget:(id)target {
@@ -72,6 +91,12 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     [appMenu addItem:langRootItem];
 
     [appMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *resetAllItem = [appMenu addItemWithTitle:app_l10n::tr(@"すべての設定を初期値に戻す...", @"Reset All Settings to Defaults...")
+                                                  action:@selector(resetAllSettingsToDefaults:)
+                                           keyEquivalent:@""];
+    resetAllItem.target = target;
+
+    [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:app_l10n::tr(@"おくさんファミコンを終了", @"Quit Okusan Famicom CRT")
                        action:@selector(terminate:)
                 keyEquivalent:@"q"];
@@ -90,7 +115,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
         return item;
     };
 
-    add(app_l10n::tr(@"NES ROM を開く...", @"Open NES ROM..."), @selector(openRomDialog:), @"o");
+    add(app_l10n::tr(@"ROM / .fds を開く...", @"Open ROM / FDS..."), @selector(openRomDialog:), @"o");
     [emuMenu addItem:[NSMenuItem separatorItem]];
     _menuPause = add(app_l10n::tr(@"一時停止", @"Pause"), @selector(togglePause:), @"p");
     _menuFreeze = add(app_l10n::tr(@"接触フリーズ (F)", @"Freeze Famicom (F)"), @selector(toggleFreeze:), @"");
@@ -144,10 +169,85 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     add(app_l10n::tr(@"RF ノイズ: 強 (1.6x)", @"RF Static: Heavy (1.6x)"), @selector(selectRfHeavy:), @"");
     [displayMenu addItem:[NSMenuItem separatorItem]];
 
+    _menu3dItem = [[NSMenuItem alloc] initWithTitle:app_l10n::tr(@"ファミコン3Dシステム (G)", @"Famicom 3D System (G)")
+                                             action:nil
+                                      keyEquivalent:@""];
+    NSMenu *menu3d = [[NSMenu alloc] initWithTitle:_menu3dItem.title];
+    menu3d.autoenablesItems = NO;
+    NSString *mode3dTitles[4] = {
+        app_l10n::tr(@"裸眼 (生CRT 60Hz交互表示)", @"Raw 60Hz CRT (Unshuttered)"),
+        app_l10n::tr(@"3Dスコープ実機 (HVC-031 液晶+残像)", @"3D Scope (HVC-031 Shutter + Glow)"),
+        app_l10n::tr(@"並行視 (SBS 最大65mm IPD制限)", @"Parallel SBS (65mm IPD Cap)"),
+        app_l10n::tr(@"交差視 (SBS L/R反転)", @"Cross-Eyed SBS (R | L)")
+    };
+    for (int i = 0; i < 4; ++i) {
+        NSMenuItem *item = [menu3d addItemWithTitle:mode3dTitles[i]
+                                             action:@selector(select3dModeFromMenu:)
+                                      keyEquivalent:@""];
+        item.target = target;
+        item.tag = i;
+        _mode3dItems[i] = item;
+    }
+    [menu3d addItem:[NSMenuItem separatorItem]];
+    _invert3dEyesItem = [menu3d addItemWithTitle:app_l10n::tr(@"左右 (L/R) 映像を入れ替える", @"Swap Left / Right Eyes")
+                                          action:@selector(toggleInvert3dEyes:)
+                                   keyEquivalent:@""];
+    _invert3dEyesItem.target = target;
+    _menu3dItem.submenu = menu3d;
+    _menu3dItem.hidden = YES;
+    _menu3dItem.enabled = NO;
+    [displayMenu addItem:_menu3dItem];
+    [displayMenu addItem:[NSMenuItem separatorItem]];
+
     add(app_l10n::tr(@"フルスクリーン切替", @"Toggle Full Screen"), @selector(toggleFullScreen:), @"f");
 
     displayItem.submenu = displayMenu;
     return displayItem;
+}
+
+- (NSMenuItem *)buildDiskMenuWithTarget:(id)target {
+    _diskTopItem = [[NSMenuItem alloc] init];
+    _diskMenu = [[NSMenu alloc] initWithTitle:app_l10n::tr(@"ディスク", @"Disk")];
+    _diskMenu.autoenablesItems = NO;
+
+    auto add = [&](NSString *title, SEL sel) {
+        NSMenuItem *item = [_diskMenu addItemWithTitle:title action:sel keyEquivalent:@""];
+        item.target = target;
+        return item;
+    };
+
+    add(app_l10n::tr(@"ディスク (.fds) を差替え...", @"Hot-Swap Disk (.fds)..."), @selector(openFdsHotSwapDialog:));
+    [_diskMenu addItem:[NSMenuItem separatorItem]];
+    _diskFlipItem = add(app_l10n::tr(@"ディスクを裏返す (C)", @"Flip Disk Side (C)"), @selector(flipFdsDisk:));
+    _diskEjectItem = add(app_l10n::tr(@"ディスクを抜く (E)", @"Eject Disk (E)"), @selector(ejectFdsDisk:));
+    [_diskMenu addItem:[NSMenuItem separatorItem]];
+
+    for (int s = 0; s < 8; ++s) {
+        NSString *title = nil;
+        if (s == 0) {
+            title = app_l10n::tr(@"A面を入れる (1)", @"Insert Side A (1)");
+        } else if (s == 1) {
+            title = app_l10n::tr(@"B面を入れる (2)", @"Insert Side B (2)");
+        } else {
+            const int diskNo = 1 + (s / 2);
+            const char sideCh = (s & 1) ? 'B' : 'A';
+            NSString *keyHint = (s < 4) ? [NSString stringWithFormat:@" (%d)", s + 1] : @"";
+            title = app_l10n::tr(
+                [NSString stringWithFormat:@"Disk %d %c面を入れる%@", diskNo, sideCh, keyHint],
+                [NSString stringWithFormat:@"Insert Disk %d Side %c%@", diskNo, sideCh, keyHint]);
+        }
+        NSMenuItem *sideItem = add(title, @selector(insertFdsSideFromMenu:));
+        sideItem.tag = s;
+        _diskInsertSideItems[s] = sideItem;
+    }
+
+    [_diskMenu addItem:[NSMenuItem separatorItem]];
+    _diskFaultItem = add(app_l10n::tr(@"エラー再読込 (ランダム故障) (T)", @"Simulate Read Error (Random Fault) (T)"),
+                         @selector(triggerFdsRandomFault:));
+
+    _diskTopItem.submenu = _diskMenu;
+    _diskTopItem.hidden = YES;
+    return _diskTopItem;
 }
 
 - (NSMenuItem *)buildControllerMenuWithTarget:(id)target {
@@ -183,6 +283,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     [mainMenu addItem:historyItem];
 
     [mainMenu addItem:[self buildDisplayMenuWithTarget:target]];
+    [mainMenu addItem:[self buildDiskMenuWithTarget:target]];
     [mainMenu addItem:[self buildControllerMenuWithTarget:target]];
 
     [NSApp setMainMenu:mainMenu];
@@ -240,8 +341,13 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
                                  muted:(BOOL)muted
                                 paused:(BOOL)paused
                                 frozen:(BOOL)frozen
+                            coreLoaded:(BOOL)coreLoaded
                         consolePowered:(BOOL)consolePowered
-                         inputBindings:(const InputBindings &)bindings {
+                         inputBindings:(const InputBindings &)bindings
+                          threeDActive:(BOOL)threeDActive
+                            view3dMode:(Famicom3dViewMode)view3dMode
+                          invert3dEyes:(BOOL)invert3dEyes
+                             fdsStatus:(const FdsDriveStatus &)fdsStatus {
     const BOOL isBwMode = config.rfMode && config.monochrome;
 
     _menuRgb.state = !config.rfMode ? NSControlStateValueOn : NSControlStateValueOff;
@@ -256,7 +362,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     _menuMute.state = muted ? NSControlStateValueOn : NSControlStateValueOff;
     _menuPause.state = paused ? NSControlStateValueOn : NSControlStateValueOff;
     _menuFreeze.state = frozen ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuPower.state = consolePowered ? NSControlStateValueOn : NSControlStateValueOff;
+    _menuPower.state = (coreLoaded && consolePowered) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuSwapPadAB.state = bindings.swapGamepadAB ? NSControlStateValueOn : NSControlStateValueOff;
     _menuLeftStick.state = bindings.useLeftStick ? NSControlStateValueOn : NSControlStateValueOff;
 
@@ -264,6 +370,45 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     _menuLangSystem.state = (langMode == AppLanguageMode::System) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuLangJapanese.state = (langMode == AppLanguageMode::Japanese) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuLangEnglish.state = (langMode == AppLanguageMode::English) ? NSControlStateValueOn : NSControlStateValueOff;
+
+    const BOOL threeD = (coreLoaded && threeDActive) ? YES : NO;
+    _menu3dItem.hidden = !threeD;
+    _menu3dItem.enabled = threeD;
+    for (int i = 0; i < 4; ++i) {
+        _mode3dItems[i].state = (static_cast<int>(view3dMode) == i) ? NSControlStateValueOn : NSControlStateValueOff;
+        _mode3dItems[i].enabled = threeD;
+    }
+    _invert3dEyesItem.state = invert3dEyes ? NSControlStateValueOn : NSControlStateValueOff;
+    _invert3dEyesItem.enabled = threeD;
+    _lastMenu3dActive = threeD;
+
+    const BOOL fdsOn = (coreLoaded && fdsStatus.active) ? YES : NO;
+    _diskTopItem.hidden = !fdsOn;
+    if (fdsOn) {
+        const BOOL hasDisk = (fdsStatus.insertedSide >= 0);
+        const BOOL canFlip = (hasDisk && fdsStatus.totalSides >= 2);
+        _diskFlipItem.enabled = canFlip;
+        _diskEjectItem.enabled = hasDisk;
+        for (int s = 0; s < 8; ++s) {
+            NSMenuItem *item = _diskInsertSideItems[s];
+            const BOOL showSlot = (s < std::max(2, fdsStatus.totalSides));
+            item.hidden = !showSlot;
+            item.enabled = (!hasDisk && s < fdsStatus.totalSides);
+            item.state = (fdsStatus.insertedSide == s) ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+        _diskFaultItem.enabled = (fdsStatus.totalSides > 0);
+    }
+    _lastMenuFdsActive = fdsOn;
+    _lastMenuFdsInserted = fdsStatus.insertedSide;
+    _lastMenuFdsSides = fdsStatus.totalSides;
+}
+
+- (BOOL)needsDynamicMenuSyncForThreeD:(BOOL)threeDActive
+                            fdsStatus:(const FdsDriveStatus &)fdsStatus {
+    return (threeDActive != _lastMenu3dActive) ||
+           ((fdsStatus.active ? YES : NO) != _lastMenuFdsActive) ||
+           (fdsStatus.insertedSide != _lastMenuFdsInserted) ||
+           (fdsStatus.totalSides != _lastMenuFdsSides);
 }
 
 @end

@@ -85,6 +85,7 @@ typedef struct {
 
 /* Shared per-frame runtime state for zero-overhead inline CPU/PPU bus hooks */
 typedef struct {
+	int      active;
 	uint8_t  cached_pins[OKUSAN_CART_PIN_COUNT];
 	int16_t  cached_rise_um[OKUSAN_CART_PIN_COUNT];
 	int16_t  cached_overlap_um[OKUSAN_CART_PIN_COUNT];
@@ -204,13 +205,17 @@ OKUSAN_INLINE uint32_t okusan_pin_xfer_bit(
 	return float_bit;
 }
 
+/* Fast inline check used in hot 1.79 MHz CPU / 5.37 MHz PPU loops when cartridge is seated flat. */
+OKUSAN_INLINE int okusan_cart_is_active(void) {
+	return okusan_cart_rt.active;
+}
+
 /* Physical 3-DOF 60-pin Famicom cartridge contact simulator shared by CPU, PPU, and Audio. */
 void okusan_set_cart_contact(int tilt, int lift);
 void okusan_set_cart_contact3(int tilt, int lift, int pitch);
 void okusan_set_pin_fault_masks(uint64_t weak_mask, uint64_t open_mask);
 void okusan_reseat_cart_contact(void);
 void okusan_begin_ppu_frame(void);
-int  okusan_cart_is_active(void);
 int  okusan_cart_is_powered(void);
 int  okusan_cart_vcc_mv(void);
 int  okusan_cart_edge_rise_um(int tilt, int lift, int x_um);
@@ -231,6 +236,43 @@ uint16_t okusan_get_cpu_pc(void);
 /* Implemented in ppu.c: applies one-shot bus-derived CIRAM corruption on '?' reseat while PPU is active */
 void okusan_ppu_on_reseat_latch(int ciram_severity, int ppu_fault_count,
                                 int tilt, int lift, int pitch, uint32_t frame_tick);
+
+/* Famicom 3D System (HVC-031 / HVC-032) shutter telemetry ($4016 bit 1 OUT1) */
+void okusan_record_4016_out1(uint8_t out1_bit);
+int  okusan_get_3d_system_active(void);
+int  okusan_get_3d_current_eye(void);
+
+/* Famicom Disk System (HVC-022) BIOS standby, hot-swap, & fault telemetry */
+enum {
+	OKUSAN_FDS_MAX_SIDES  = 8,
+	OKUSAN_FDS_SIDE_BYTES = 65500
+};
+
+enum OkusanFdsFaultMode {
+	OKUSAN_FDS_FAULT_NONE = 0,
+	OKUSAN_FDS_FAULT_ERR01_HALF_INSERTED = 1,
+	OKUSAN_FDS_FAULT_ERR02_LOW_BATTERY   = 2,
+	OKUSAN_FDS_FAULT_ERR21_BAD_VOL_HDR   = 3,
+	OKUSAN_FDS_FAULT_ERR22_BLOCK1_ID     = 4,
+	OKUSAN_FDS_FAULT_ERR23_BLOCK2_ID     = 5,
+	OKUSAN_FDS_FAULT_ERR24_BLOCK3_ID     = 6,
+	OKUSAN_FDS_FAULT_ERR25_BLOCK4_ID     = 7,
+	OKUSAN_FDS_FAULT_ERR27_CRC_ERROR     = 8,
+	OKUSAN_FDS_FAULT_ERR28_PREMATURE_END = 9
+};
+
+void     okusan_fds_tick_frame(void);
+int      okusan_fds_is_active(void);
+void     okusan_fds_get_status(int *out_inserted_side, int *out_total_sides,
+                               int *out_motor_on, int *out_rw_activity,
+                               uint32_t *out_seek_seq, uint32_t *out_latch_seq,
+                               int *out_fault_mode);
+int      okusan_fds_hot_swap_disk(const uint8_t *data, uint32_t size);
+void     okusan_fds_eject_disk(void);
+void     okusan_fds_set_side(int side);
+void     okusan_fds_clear_fault(void);
+int      okusan_fds_trigger_random_fault(uint32_t rng_seed);
+uint8_t *okusan_fds_get_side_ptr(int side, const uint8_t **out_orig_ptr);
 
 #ifdef __cplusplus
 }

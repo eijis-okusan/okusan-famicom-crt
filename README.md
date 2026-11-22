@@ -1,11 +1,11 @@
-# Okusan Famicom CRT (おくさんファミコン) `v0.5`
+# Okusan Famicom CRT (おくさんファミコン) `v0.6`
 
 **English** | [日本語 (Japanese)](README.ja.md)
 
-A standalone Famicom / NES player for macOS that pairs a **1980s 14-inch CRT television simulation** (300-ohm VHF RF signal, single-gun B&W P4 phosphor mode, cheap plastic-cabinet monaural speaker DSP) with a **physical & electrical simulator of tilted 60-pin Famicom cartridge contacts**.
+A standalone Famicom / NES player for macOS that pairs a **1980s 14-inch CRT television simulation** (300-ohm VHF RF signal, single-gun B&W P4 phosphor mode, cheap plastic-cabinet monaural speaker DSP) with a **physical & electrical simulator of tilted 60-pin Famicom cartridge contacts**, **Famicom 3D System (HVC-031) shutter / stereoscopic views**, and **Famicom Disk System (HVC-022)** disk drive & fault emulation.
 
-> **No ROM files are included.**  
-> Launching the app without a cartridge powers the television on into open-tuner **RF snow standby**—just like turning on an old CRT TV before inserting a cassette. Drag and drop any `.nes` ROM onto the window or press `Cmd + O` to insert the cartridge and power on the console.
+> **No ROMs or FDS BIOS files (`disksys.rom`) are included.**  
+> Launching the app without a cartridge powers the television on into open-tuner **RF snow standby**—just like turning on an old CRT TV before inserting a cassette. Drag and drop any `.nes` / `.fds` / BIOS file onto the window or press `Cmd + O` to insert it and power on the console.
 
 ---
 
@@ -25,9 +25,9 @@ A standalone Famicom / NES player for macOS that pairs a **1980s 14-inch CRT tel
 
 ## Key Features & Technical Architecture
 
-### 1. Two-Pass GLSL CRT Display Pipeline (`src/video/`, `resources/shaders/`)
+### 1. Two-Pass GLSL CRT Display & VSync Pipeline (`src/video/`, `resources/shaders/`)
 
-All video output passes through **Pass 0** ([`okusan-crt-beamload.glsl`](resources/shaders/okusan-crt-beamload.glsl)), which downsamples squared Rec.601 luminance across the current and previous frames into a 32×32 `RGBA16F` target to estimate cathode beam load and flyback high-voltage sag, followed by one of three **Pass 1** display shaders:
+All video output passes through **Pass 0** ([`okusan-crt-beamload.glsl`](resources/shaders/okusan-crt-beamload.glsl)), which downsamples squared Rec.601 luminance across the current and previous frames into a `1×1 RGBA16F` target (fed from a 4-slot GL texture ring with cached GLSL uniform locations) to estimate cathode beam load and flyback high-voltage sag, followed by one of three **Pass 1** display shaders. Frame cadence is driven by `EmulationPacer` (`CADisplayLink` locked 1:1 on 60 Hz / 1:2 on 120 Hz ProMotion displays with an `NSActivityLatencyCritical` assertion) paired with smooth Dynamic Rate Control (`MacAudioEngine`) for tear- and stutter-free scrolling:
 
 - **RGB Monitor** ([`okusan-crt-display.glsl`](resources/shaders/okusan-crt-display.glsl), `Cmd + 1`)
   - Clean RGB signal with barrel tube curvature, aperture slot mask, NTSC 480i alternating-field interlace or 240p scanlines, subtle RGB gun convergence offset, glass halation, and HV bloom.
@@ -64,6 +64,21 @@ The modified `fceumm` core embeds an exact micrometer-scale physical model of th
     - Snapping a faulted cartridge back with **`/` (`?`)** latches a one-shot spurious write into internal 2 KB `CIRAM` (`NTARAM`), leaving background tile corruption on the current screen until scrolled away, changed, or reset (`R`).
 - **Interactive 1:1 mm HUD (`\` or click)**: Visualizes the blue socket cross-section, spring-to-pad overlap, air gaps, `Vcc`, `[W/M/O/X]` totals, all 60 pin tiles with live HIGH duty bars and cyan `XTALK` links, and a clickable per-pin live bus inspector (`$orig -> $eff`).
 - Full mathematical & hardware specification: [`docs/60pin-hardware-notes.en.md`](docs/60pin-hardware-notes.en.md) ([日本語版仕様書](docs/60pin-hardware-notes.md))
+
+### 4. Famicom 3D System (`HVC-031`, `$4016 OUT1`)
+
+When a game drives alternating left/right stereoscopic shutter frames via `$4016` bit 1 (`OUT1`), `ppu.c` detects the active 3D shutter cadence at scanline 120 (with per-frame pulse fallback) and unlocks the **CRT Display → Famicom 3D System (`G`)** submenu:
+
+- **Raw 60Hz CRT (Default)**: Displays the unshuttered raw 60 Hz CRT feed so naked-eye titles and alternating fields remain crisp without dimming.
+- **3D Scope (`HVC-031`)**: Simulates the TN-LCD polarizer dimming (~42% transmittance) and 30 Hz alternating shutter modulation.
+- **Parallel SBS (`65mm IPD Cap`)**: Places left and right CRT tubes side by side with human interpupillary spacing capped for comfortable free-viewing.
+- **Cross-Eyed SBS (`R | L`)**: Swaps viewport placement for cross-eyed stereoscopic viewing, plus an independent **Swap Left / Right Eyes** toggle.
+
+### 5. Famicom Disk System (`HVC-022`, User-Supplied BIOS)
+
+- **Bring Your Own BIOS (`disksys.rom`)**: No copyrighted Nintendo BIOS is bundled with the app or repository. Opening your own legal 8 KB / 16 KB / iNES-wrapped FDS BIOS (`*NINTENDO-HVC*` verified) via `Cmd + O` or drag-and-drop boots directly into FDS BIOS standby and automatically registers it at `~/Library/Application Support/Okusan-Famicom-CRT-Player/disksys.rom` for future `.fds` launches.
+- **Physical Disk Drive Controls**: Supports hot-swapping `.fds` images onto live BIOS standby, flipping sides (`C`), ejecting (`E`), inserting sides 1–4 (`1`–`4`, up to 8 sides via menu), and non-destructive per-disk XOR write persistence (`fds_diff_<name>.ofds`).
+- **Random FDS Read / Hardware Faults (`T`)**: Injects authentic FDS disk errors across `ERR. 01` (half-inserted), `ERR. 02` (low battery), `ERR. 21–25` (volume/block header ID errors), `ERR. 27` (CRC error), and `ERR. 28` (premature end); press `R` to clear faults and reset.
 
 ---
 
@@ -112,12 +127,12 @@ make distclean   # Remove build/ and clean third_party/fceumm objects
 
 ## Usage & Controls
 
-### Loading ROMs & History
+### Loading ROMs, FDS Images & History
 
-- Drop any `.nes` file onto the window, choose **Emulator → Open NES ROM...** (`Cmd + O`), or pass a ROM path as the first CLI argument.
+- Drop any `.nes`, `.fds`, or user-supplied FDS BIOS (`.rom` / `.bin` / `.nes`) file onto the window, choose **Emulator → Open ROM / FDS...** (`Cmd + O`), or pass a path as the first CLI argument.
 - Up to **10 recently played ROMs** are saved in `NSUserDefaults` (`recentRoms`) and accessible under **History** (`履歴`) in the menu bar. Choose **Clear History** to reset the list.
-- Quick Save (`F5`) / Quick Load (`F8`) files are stored in:
-  `~/Library/Application Support/Okusan-Famicom-CRT-Player/quickstate_<rom_name>.ss`
+- Quick Save (`F5`) / Quick Load (`F8`) files and FDS disk XOR save diffs are stored in:
+  `~/Library/Application Support/Okusan-Famicom-CRT-Player/`
 
 ### Keyboard & Cartridge Shortcuts
 
@@ -134,14 +149,16 @@ make distclean   # Remove build/ and clean third_party/fceumm objects
 | `\` (or click HUD) | Pin / unpin the 60-pin connector HUD (`\` or `¥` on JIS) |
 | `O` | Toggle Famicom console power (cold boot on power-on) |
 | `@` | When ON: power OFF; when OFF: cold-boot with random 60-pin faults + HUD |
-| `R` (press or hold) | Reset console (mutes audio & clears picture while held) |
+| `R` (press or hold) | Reset console (mutes audio & clears picture while held; clears FDS fault) |
 | `F` | Toggle contact freeze (latches audio pitch loop + screen bump) |
+| `G` | Cycle 3D System display mode (`Raw 60Hz CRT` → `3D Scope` → `Parallel` → `Cross`) |
+| `C` / `E` / `1–4` / `T` | FDS Disk: Flip side / Eject / Insert Side 1–4 / Inject random read error |
 | `P` | Pause / resume emulation |
 | `F5` / `F8` | Quick Save / Quick Load |
 | `Cmd + 1` / `2` / `3` | RGB Monitor / Color RF / B&W RF Television |
 | `Cmd + I` / `B` / `C` / `K` | Toggle 480i/240p / HV Bloom / Curvature / Slot Mask |
 | `Cmd + M` / `Cmd + F` | Mute Audio / Toggle Full Screen |
-| `Cmd + O` / `Cmd + ,` | Open NES ROM / Controller Settings Window |
+| `Cmd + O` / `Cmd + ,` | Open ROM / FDS... / Controller Settings Window |
 
 ### Gamepad Support
 
@@ -163,19 +180,19 @@ The UI automatically matches your macOS system language on launch, and can be sw
 
 ```text
   FCEUmm Core (third_party/fceumm/src/)
-   ├─ x6502.c / ppu.c / pputile.h  <── 60-Pin Bus Hooks ──>  okusan_cart.c / okusan_cart.h
-   │                                                          (3-DOF geometry, Vcc, XTALK, telemetry)
-   ▼ (256x240 RGB565 video, 48 kHz APU PCM, 60-pin telemetry)
+   ├─ x6502.c / ppu.c / pputile.h / input.c / fds.c  <── Hooks ──>  okusan_cart.c / okusan_cart.h
+   │   (3-DOF geometry, Vcc, XTALK, $4016 3D shutter, HVC-022 FDS drive & ERR.01..28 faults)
+   ▼ (256x240 video, 48 kHz APU PCM, 60-pin / 3D / FDS telemetry)
   C++17 Core Engine (src/core/, Zero Cocoa deps)
-   ├─ FamicomCore              (libretro loader, run/reset, savestate, 60-pin API)
+   ├─ FamicomCore              (libretro loader, run/reset, savestate, 60-pin / 3D / FDS API)
    └─ CartridgeFaultInjector   (cold-boot 60-pin fault synthesizer & boot prober)
    ▼
   macOS Presentation Layer (src/{app,audio,video,hud,input}/)
-   ├─ AppDelegate + AppMenuController + AppPreferences + LicensesWindow + AppLocalization
-   ├─ CrtScreenView + FreezeFrameGenerator + GLSL Shaders (2-pass beamload & CRT/RF/P4)
+   ├─ AppDelegate + AppMenuController + AppPreferences + EmulationPacer + LicensesWindow + AppLocalization
+   ├─ CrtScreenView + CrtShaderProgram + StatusBanner + FreezeFrameGenerator + GLSL Shaders (1x1 Pass 0 & CRT/RF/P4/3D)
    ├─ CartConnectorHud         (1:1 mm socket cutaway & live pin bus inspector)
-   ├─ MacAudioEngine + TvSpeakerDsp.hpp (CoreAudio + paper-cone EQ / intercarrier buzz)
-   └─ InputBindings + ControllerSettingsWindow (keyboard + GameController)
+   ├─ MacAudioEngine + TvSpeakerDsp.hpp (CoreAudio DRC + paper-cone EQ / intercarrier buzz)
+   └─ InputBindings + InputPoller + ControllerSettingsWindow (keyboard + GameController)
 ```
 
 ### Directory Tree
@@ -191,16 +208,16 @@ The UI automatically matches your macOS system language on launch, and can be sw
 ├── resources/
 │   ├── shaders/                    # 2-pass GLSL 1.20 CRT/RF/B&W shaders
 │   ├── AppIcon.icns                # macOS app icon
-│   └── Info.plist                  # Bundle metadata (v0.5)
+│   └── Info.plist                  # Bundle metadata (v0.6)
 ├── src/
-│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, LicensesWindow, AppLocalization
-│   ├── core/                       # FamicomCore & CartridgeFaultInjector (pure C++17 libretro/60-pin API)
-│   ├── audio/                      # TvSpeakerDsp.hpp (pure C++17) & MacAudioEngine (CoreAudio)
-│   ├── video/                      # FreezeFrameGenerator (pure C++17) & CrtScreenView (OpenGL 2-pass CRT renderer)
+│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, EmulationPacer, LicensesWindow, AppLocalization
+│   ├── core/                       # FamicomCore & CartridgeFaultInjector (pure C++17 libretro/60-pin/3D/FDS API)
+│   ├── audio/                      # TvSpeakerDsp.hpp (pure C++17) & MacAudioEngine (CoreAudio + DRC)
+│   ├── video/                      # FreezeFrameGenerator (pure C++17), CrtScreenView, CrtShaderProgram, StatusBanner
 │   ├── hud/                        # CartConnectorHud (CoreGraphics 1:1 mm connector & inspector)
-│   └── input/                      # InputBindings & ControllerSettingsWindow
+│   └── input/                      # InputBindings, InputPoller, ControllerSettingsWindow
 ├── third_party/
-│   └── fceumm/                     # Modified libretro-fceumm core source (okusan_cart.c/.h + CPU/PPU hooks)
+│   └── fceumm/                     # Modified libretro-fceumm core source (okusan_cart.c/.h, 3D shutter, FDS, CPU/PPU hooks)
 ├── LICENSE                         # GNU General Public License v2.0
 ├── Makefile
 ├── README.md
@@ -215,7 +232,7 @@ The UI automatically matches your macOS system language on launch, and can be sw
 
 This repository incorporates a modified version of **[libretro-fceumm](https://github.com/libretro/libretro-fceumm)** and is licensed under the **GNU General Public License v2.0** (see [`LICENSE`](LICENSE)).
 
-- **FCEUmm (libretro)** — NES/Famicom core based on FCE Ultra / FCEU-mm by Xodnizel, CaH4e3, BERO, and libretro contributors (GNU GPL v2.0; extended with `src/okusan_cart.h`, `src/okusan_cart.c`, `Makefile.common`, `src/ppu.c`, `src/ppu.h`, `src/pputile.h`, and `src/x6502.c`)
+- **FCEUmm (libretro)** — NES/Famicom core based on FCE Ultra / FCEU-mm by Xodnizel, CaH4e3, BERO, and libretro contributors (GNU GPL v2.0; extended with `src/okusan_cart.h`, `src/okusan_cart.c`, `Makefile.common`, `src/ppu.c`, `src/ppu.h`, `src/pputile.h`, `src/x6502.c`, `src/fceu.c`, `src/fds.c`, `src/fds.h`, and `src/input.c`)
 - **libretro API & libretro-common** — Bundled inside `third_party/fceumm` (MIT License)
 - **nes_ntsc** (Shay Green / Blargg) & **EMU2413** (Mitsutaka Okazaki) — Bundled inside `third_party/fceumm`
 

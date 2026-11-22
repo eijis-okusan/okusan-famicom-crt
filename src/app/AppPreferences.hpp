@@ -15,11 +15,20 @@ std::string applicationSupportDirectory();
 /// Returns a filesystem-safe quick-save file path derived from `romPath`.
 std::string quickStatePathForRom(NSString *romPath);
 
-/// Loads CRT shader flags and audio mute state from NSUserDefaults.
-void loadDisplayPreferences(CrtDisplayConfig &config, bool &outMuted);
+/// Returns the per-disk XOR diff file path for FDS RAM/disk writes.
+std::string fdsSaveDiffPathForDisk(NSString *diskPath);
 
-/// Persists CRT shader flags and audio mute state to NSUserDefaults.
-void saveDisplayPreferences(const CrtDisplayConfig &config, bool muted);
+/// Validates and caches a user-supplied 8 KB FDS BIOS (`*NINTENDO-HVC*`) into Application Support (`disksys.rom`).
+void cacheFdsBiosIfValid(NSString *romPath);
+
+/// Loads CRT shader flags, 3D eye swap flag, and audio mute state from NSUserDefaults.
+void loadDisplayPreferences(CrtDisplayConfig &config, bool &outMuted, bool &outInvert3dEyes);
+
+/// Persists CRT shader flags, 3D eye swap flag, and audio mute state to NSUserDefaults.
+void saveDisplayPreferences(const CrtDisplayConfig &config, bool muted, bool invert3dEyes);
+
+/// Clears persisted display/audio/3D preference keys so defaults apply cleanly.
+void clearDisplayPreferences();
 
 /// Loads normalized, deduplicated recent ROM paths (up to `kMaxRecentRoms`).
 NSMutableArray<NSString *> *loadRecentRomPaths();

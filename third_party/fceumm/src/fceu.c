@@ -238,6 +238,7 @@ void ResetGameLoaded(void)
 int UNIFLoad(const char *name, FCEUFILE *fp);
 int iNESLoad(const char *name, FCEUFILE *fp);
 int FDSLoad(const char *name, FCEUFILE *fp);
+int FDSIsBiosStream(FCEUFILE *fp);
 int NSFLoad(FCEUFILE *fp);
 
 FCEUGI *FCEUI_LoadGame(const char *name, const uint8_t *databuf, size_t databufsize,
@@ -272,6 +273,9 @@ FCEUGI *FCEUI_LoadGame(const char *name, const uint8_t *databuf, size_t databufs
       return NULL;
    }
 
+   /* Route raw or iNES-wrapped FDS BIOS dumps to FDSLoad before iNESLoad claims them. */
+   if (FDSIsBiosStream(fp) && FDSLoad(NULL, fp))
+      goto endlseq;
    if (iNESLoad(name, fp))
       goto endlseq;
    if (NSFLoad(fp))

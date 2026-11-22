@@ -22,8 +22,23 @@ struct CartPinReading {
 };
 
 /**
+ * Snapshot of Famicom Disk System (HVC-022) drive activity and active fault state.
+ */
+struct FdsDriveStatus {
+    bool active = false;
+    int insertedSide = -1;
+    int totalSides = 0;
+    bool motorOn = false;
+    bool rwActivity = false;
+    uint32_t seekSeq = 0;
+    uint32_t latchSeq = 0;
+    int faultMode = 0;
+};
+
+/**
  * Wraps the modified libretro-fceumm shared library, owning the active ROM
- * instance, double-buffered XRGB8888 video frames, and 3-DOF cartridge pose API.
+ * instance, double-buffered XRGB8888 video frames, 3-DOF cartridge pose API,
+ * 3D System ($4016 OUT1) shutter telemetry, and FDS drive control.
  */
 class FamicomCore {
 public:
@@ -59,6 +74,21 @@ public:
     int  cartridgeVccMv() const;
     bool isCpuJammed() const;
     uint16_t cpuProgramCounter() const;
+
+    // Famicom 3D System ($4016 OUT1) active-shutter telemetry
+    bool is3dSystemActive() const;
+    int  current3dEye() const;
+
+    // Famicom Disk System (HVC-022) drive control, fault injection, and XOR save diff
+    bool isFdsActive() const;
+    FdsDriveStatus fdsDriveStatus() const;
+    int  hotSwapFdsDisk(const std::string &path);
+    void ejectFdsDisk();
+    void setFdsDiskSide(int side);
+    void clearFdsFault();
+    int  triggerRandomFdsFault();
+    bool saveFdsDiskDiff(const std::string &savePath) const;
+    bool loadFdsDiskDiff(const std::string &savePath);
 
     bool saveState(const std::string &path) const;
     bool loadState(const std::string &path);

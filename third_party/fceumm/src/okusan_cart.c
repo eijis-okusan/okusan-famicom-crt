@@ -43,6 +43,7 @@ const OkusanPinSpec okusan_pins60_spec[OKUSAN_CART_PIN_COUNT] = {
 };
 
 OkusanCartRuntime okusan_cart_rt = {
+	0,
 	{0}, {0}, {0},
 	0, 4978, 256, 0, 0, 0, 0,
 	{0}, {0}, {0}, {0}, {0}, {0}, {0}
@@ -158,6 +159,7 @@ static void update_crosstalk_flags(void) {
 static void refresh_frame_cache(void) {
 	const int has_pose_skew  = (okusan_tilt != 0 || okusan_lift != 0 || okusan_pitch != 0);
 	const int has_pin_masks  = (okusan_pin_weak_mask != 0ULL || okusan_pin_open_mask != 0ULL);
+	okusan_cart_rt.active    = (has_pose_skew || has_pin_masks) ? 1 : 0;
 
 	if (!has_pose_skew) {
 		for (int i = 0; i < OKUSAN_CART_PIN_COUNT; ++i) {
@@ -375,12 +377,6 @@ void okusan_reseat_cart_contact(void) {
 	okusan_pin_weak_mask = 0ULL;
 	okusan_pin_open_mask = 0ULL;
 	okusan_set_cart_contact3(0, 0, 0);
-}
-
-__attribute__((visibility("default")))
-int okusan_cart_is_active(void) {
-	return (okusan_tilt != 0 || okusan_lift != 0 || okusan_pitch != 0 ||
-	        okusan_pin_weak_mask != 0ULL || okusan_pin_open_mask != 0ULL);
 }
 
 __attribute__((visibility("default")))

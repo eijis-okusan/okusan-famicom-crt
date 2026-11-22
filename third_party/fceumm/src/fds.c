@@ -36,6 +36,7 @@
 #include "file.h"
 #include "fceu-memory.h"
 #include "cart.h"
+#include "okusan_cart.h"
 #include "md5.h"
 
 /*	TODO:  Add code to put a delay in between the time a disk is inserted
@@ -70,8 +71,9 @@ static uint8_t *CHRRAM = NULL;
 static uint32_t CHRRAMSize;
 
 /* Original disk data backup, to help in creating save states. */
-static uint8_t *diskdatao[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-static uint8_t *diskdata[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+static uint8_t *diskdatao_buf = NULL;
+static uint8_t *diskdatao[OKUSAN_FDS_MAX_SIDES] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+static uint8_t *diskdata[OKUSAN_FDS_MAX_SIDES] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
 static uint32_t TotalSides;
 static uint8_t DiskWritten = 0;	/* Set to 1 if disk was written to. */
@@ -79,6 +81,18 @@ static uint8_t writeskip;
 static int32_t DiskPtr;
 static int32_t DiskSeekIRQ;
 static uint8_t SelectDisk, InDisk;
+
+/* Okusan CRT FDS live status, delayed swap, mechanical synth telemetry, and fault injector */
+static int      okusan_fds_active = 0;
+static int      okusan_fds_pending_side = -1;
+static int      okusan_fds_delayed_insert_frames = 0;
+static int      okusan_fds_rw_decay = 0;
+static uint32_t okusan_fds_seek_seq = 0;
+static uint32_t okusan_fds_latch_seq = 0;
+static int      okusan_fds_fault_mode = OKUSAN_FDS_FAULT_NONE;
+static int      okusan_fds_fault_motor_frames = 0;
+static int      okusan_fds_err01_tripped = 0;
+static uint32_t okusan_fds_fault_rng_ctr = 0x9E3779B9u;
 
 enum FDS_DiskBlockIDs {
 	DSK_INIT = 0,
@@ -131,9 +145,11 @@ static void FDSStateRestore(int version) {
 	 *  - set mapperFDS_blockstart + mapperFDS_diskaddr beyond 65500
 	 *    (BYTES_PER_SIDE), causing GET_FDS_DISK() to OOB-read up
 	 *    to 65 KB past the disk buffer. */
+	if (TotalSides > OKUSAN_FDS_MAX_SIDES)
+		TotalSides = OKUSAN_FDS_MAX_SIDES;
 	if (InDisk != 255 && InDisk >= TotalSides)
 		InDisk = 255;	/* eject */
-	if (SelectDisk >= TotalSides)
+	if (TotalSides == 0 || SelectDisk >= TotalSides)
 		SelectDisk = 0;
 	if (mapperFDS_block > DSK_FILEDATA)	/* enum values 0..4 are valid */
 		mapperFDS_block = DSK_INIT;
@@ -187,8 +203,15 @@ static void FDSInit(void) {
 	IRQCount = IRQLatch = IRQa = 0;
 
 	FDSSoundReset();
-	InDisk = 0;
+	InDisk = (TotalSides > 0) ? 0 : 255;
 	SelectDisk = 0;
+	okusan_fds_active = 1;
+	okusan_fds_pending_side = -1;
+	okusan_fds_delayed_insert_frames = 0;
+	okusan_fds_rw_decay = 0;
+	okusan_fds_fault_mode = OKUSAN_FDS_FAULT_NONE;
+	okusan_fds_fault_motor_frames = 0;
+	okusan_fds_err01_tripped = 0;
 
 	mapperFDS_control = 0;
 	mapperFDS_filesize = 0;
@@ -255,6 +278,18 @@ static DECLFR(FDSRead4030) {
 	if (X.IRQlow & FCEU_IQEXT) ret |= 1;
 	if (X.IRQlow & FCEU_IQEXT2) ret |= 2;
 
+	if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR27_CRC_ERROR) {
+		if (mapperFDS_diskaccess &&
+		    ((mapperFDS_block >= DSK_FILECNT && (mapperFDS_control & 0x10)) ||
+		     (mapperFDS_block >= DSK_FILEHDR && mapperFDS_diskaddr >= 2))) {
+			ret |= 0x10;
+		}
+	} else if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR28_PREMATURE_END) {
+		if (mapperFDS_block == DSK_FILEDATA && mapperFDS_diskaddr >= 2) {
+			ret |= 0x40;
+		}
+	}
+
 	{
 		X6502_IRQEnd(FCEU_IQEXT);
 		X6502_IRQEnd(FCEU_IQEXT2);
@@ -267,12 +302,24 @@ static DECLFR(FDSRead4031) {
 
 	if (FDS_DISK_INSERTED && mapperFDS_control & 0x04) {
 		mapperFDS_diskaccess = 1;
+		okusan_fds_rw_decay = 4;
 		ret = 0;
+
+		if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR01_HALF_INSERTED &&
+		    okusan_fds_err01_tripped) {
+			DiskSeekIRQ = 150;
+			X6502_IRQEnd(FCEU_IQEXT2);
+			return 0xff;
+		}
 
 		switch (mapperFDS_block) {
 		case DSK_FILEHDR:
 			if (mapperFDS_diskaddr < mapperFDS_blocklen) {
 				ret = GET_FDS_DISK();
+				if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR24_BLOCK3_ID &&
+				    mapperFDS_diskaddr == 0) {
+					ret = 0x00;
+				}
 				switch (mapperFDS_diskaddr) {
 				case 13:
 					mapperFDS_filesize = ret;
@@ -286,7 +333,21 @@ static DECLFR(FDSRead4031) {
 			break;
 		default:
 			if (mapperFDS_diskaddr < mapperFDS_blocklen) {
+				uint16_t rel_addr = mapperFDS_diskaddr;
 				ret = GET_FDS_DISK();
+				if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR21_BAD_VOL_HDR &&
+				    mapperFDS_block == DSK_VOLUME && rel_addr >= 1 && rel_addr <= 14) {
+					ret ^= 0x55;
+				} else if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR22_BLOCK1_ID &&
+				           mapperFDS_block == DSK_VOLUME && rel_addr == 0) {
+					ret = 0x00;
+				} else if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR23_BLOCK2_ID &&
+				           mapperFDS_block == DSK_FILECNT && rel_addr == 0) {
+					ret = 0x00;
+				} else if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR25_BLOCK4_ID &&
+				           mapperFDS_block == DSK_FILEDATA && rel_addr == 0) {
+					ret = 0x00;
+				}
 				mapperFDS_diskaddr++;
 			}
 			break;
@@ -308,10 +369,23 @@ static DECLFR(FDSRead4032) {
 
 	if (InDisk == 255 || !(FDSRegs[5] & 1) || (FDSRegs[5] & 2))
 		ret |= 2;
+
+	if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR01_HALF_INSERTED &&
+	    (okusan_fds_err01_tripped || okusan_fds_fault_motor_frames >= 8)) {
+		okusan_fds_err01_tripped = 1;
+		ret |= 0x05;
+	} else if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR28_PREMATURE_END &&
+	           mapperFDS_block == DSK_FILEDATA && mapperFDS_diskaddr >= 2) {
+		ret |= 0x02;
+	}
+
 	return ret;
 }
 
 static DECLFR(FDSRead4033) {
+	if (okusan_fds_fault_mode == OKUSAN_FDS_FAULT_ERR02_LOW_BATTERY) {
+		return 0x00;
+	}
 	return 0x80;		/* battery */
 }
 
@@ -344,6 +418,7 @@ static DECLFW(FDSWrite) {
 		break;
 	case 0x4024:
 		if (FDS_DISK_INSERTED && ~mapperFDS_control & 0x04) {
+			okusan_fds_rw_decay = 4;
 
 			if (mapperFDS_diskaccess == 0) {
 				mapperFDS_diskaccess = 1;
@@ -380,6 +455,7 @@ static DECLFW(FDSWrite) {
 				mapperFDS_diskaccess = 0;
 
 				DiskSeekIRQ = 150;
+				okusan_fds_seek_seq++;
 
 				/* blockstart  - address of block on disk
 				 * diskaddr    - address relative to blockstart
@@ -413,7 +489,9 @@ static DECLFW(FDSWrite) {
 				mapperFDS_blockstart = 0;
 				mapperFDS_blocklen = 0;
 				mapperFDS_diskaddr = 0;
+				mapperFDS_diskaccess = 0;
 				DiskSeekIRQ = 150;
+				okusan_fds_seek_seq++;
 			}
 			if (V & 0x40) { /* turn on motor */
 				DiskSeekIRQ = 150;
@@ -588,9 +666,18 @@ static const char *getManufacturer(uint8_t code)
 }
 
 static void FreeFDSMemory(void) {
+	uint32_t x;
 	if (FDSROM)
 		free(FDSROM);
 	FDSROM = NULL;
+	FDSROMSize = 0;
+	if (diskdatao_buf)
+		free(diskdatao_buf);
+	diskdatao_buf = NULL;
+	for (x = 0; x < OKUSAN_FDS_MAX_SIDES; x++) {
+		diskdata[x] = NULL;
+		diskdatao[x] = NULL;
+	}
 	if (FDSBIOS)
 		free(FDSBIOS);
 	FDSBIOS = NULL;
@@ -634,16 +721,17 @@ static int SubLoad(FCEUFILE *fp) {
 	} else
 		TotalSides = header[4];
 
-	if (TotalSides > 8) TotalSides = 8;
+	if (TotalSides > OKUSAN_FDS_MAX_SIDES) TotalSides = OKUSAN_FDS_MAX_SIDES;
 	if (TotalSides < 1) TotalSides = 1;
 
-	FDSROMSize = TotalSides * BYTES_PER_SIDE;
+	/* Pre-allocate all 8 side slots so later hot-swapping never invalidates ExState pointers. */
+	FDSROMSize = OKUSAN_FDS_MAX_SIDES * BYTES_PER_SIDE;
 	FDSROM = (uint8_t*)FCEU_malloc(FDSROMSize);
-
 	if (!FDSROM)
 		return (0);
+	memset(FDSROM, 0, FDSROMSize);
 
-	for (x = 0; x < TotalSides; x++)
+	for (x = 0; x < OKUSAN_FDS_MAX_SIDES; x++)
 		diskdata[x] = &FDSROM[x * BYTES_PER_SIDE];
 
 	md5_starts(&md5);
@@ -677,72 +765,166 @@ static void PostSave(void) {
 	}
 }
 
-int FDSLoad(const char *name, FCEUFILE *fp) {
-	FCEUFILE *zp;
-	uint32_t x;
+static int find_bytes_in_slice(const uint8_t *haystack, size_t hay_len,
+                               const uint8_t *needle, size_t needle_len) {
+	size_t i;
+	if (!haystack || !needle || needle_len == 0 || hay_len < needle_len) return 0;
+	for (i = 0; i <= hay_len - needle_len; i++) {
+		if (haystack[i] == needle[0] && memcmp(haystack + i, needle, needle_len) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
 
-	char *fn = FCEU_MakeFName(FCEUMKF_FDSROM, 0, 0);
+/* Extracts an 8 KB FDS BIOS image from either raw 8 KB dumps, mirrored 16 KB dumps,
+ * or iNES-wrapped (.nes, CHR == 0) BIOS files into `out_bios`. Returns 1 on match. */
+static int extract_fds_bios_from_fp(FCEUFILE *fp, uint8_t *out_bios) {
+	static const uint8_t kFdsHvcSig[14] = {
+		'*','N','I','N','T','E','N','D','O','-','H','V','C','*'
+	};
+	uint64_t fsize;
+	uint8_t *buf;
+	size_t read_len;
+	size_t prg_start = 0;
+	size_t num_chunks;
+	int is_ines = 0;
+	int found = 0;
+	long long k;
 
-	if (!(zp = FCEU_fopen(fn, NULL, 0))) {
-		FCEU_PrintError("FDS BIOS ROM image missing!\n");
-		FCEUD_DispMessage(RETRO_LOG_ERROR, 3000, "FDS BIOS image (disksys.rom) missing");
-		free(fn);
+	if (!fp || !out_bios) return 0;
+	fsize = FCEU_fgetsize(fp);
+	if (fsize < 8192 || fsize > 65552) return 0;
+
+	buf = (uint8_t *)malloc((size_t)fsize);
+	if (!buf) return 0;
+
+	FCEU_fseek(fp, 0, SEEK_SET);
+	read_len = FCEU_fread(buf, 1, (size_t)fsize, fp);
+	FCEU_fseek(fp, 0, SEEK_SET);
+
+	if (read_len != (size_t)fsize) {
+		free(buf);
 		return 0;
 	}
 
-	free(fn);
+	if (fsize == 8192 && memcmp(buf, "NES\x1a", 4) != 0) {
+		if (buf[0x1FFD] >= 0xE0) {
+			memcpy(out_bios, buf, 8192);
+			found = 1;
+		}
+		free(buf);
+		return found;
+	}
+
+	if (fsize >= 16 && memcmp(buf, "NES\x1a", 4) == 0) {
+		is_ines = 1;
+		if (buf[5] != 0) { /* FDS BIOS never uses CHR-ROM banks */
+			free(buf);
+			return 0;
+		}
+		prg_start = 16u + ((buf[6] & 4u) ? 512u : 0u);
+	}
+
+	if (fsize <= prg_start || (fsize - prg_start) < 8192) {
+		free(buf);
+		return 0;
+	}
+
+	num_chunks = (size_t)((fsize - prg_start) / 8192u);
+	/* Prefer the highest 8 KB bank first (NROM-128 maps $E000-$FFFF to the last 8 KB). */
+	for (k = (long long)num_chunks - 1; k >= 0; k--) {
+		const uint8_t *chunk = buf + prg_start + (size_t)k * 8192u;
+		if (chunk[0x1FFD] >= 0xE0 &&
+		    find_bytes_in_slice(chunk, 8192u, kFdsHvcSig, sizeof(kFdsHvcSig))) {
+			memcpy(out_bios, chunk, 8192u);
+			found = 1;
+			break;
+		}
+	}
+	(void)is_ines;
+	free(buf);
+	return found;
+}
+
+int FDSIsBiosStream(FCEUFILE *fp) {
+	uint8_t tmp[8192];
+	return extract_fds_bios_from_fp(fp, tmp);
+}
+
+int FDSLoad(const char *name, FCEUFILE *fp) {
+	uint32_t x;
+	int bios_standby = 0;
 
 	FreeFDSMemory();
-
 	ResetCartMapping();
 
 	FDSBIOSsize = 8192;
 	FDSBIOS = (uint8_t*)FCEU_gmalloc(FDSBIOSsize);
-	if (!FDSBIOS) {
-		FCEU_fclose(zp);
+	if (!FDSBIOS)
 		return 0;
-	}
-	SetupCartPRGMapping(0, FDSBIOS, FDSBIOSsize, 0);
 
-	if (FCEU_fread(FDSBIOS, 1, FDSBIOSsize, zp) != FDSBIOSsize) {
-		if (FDSBIOS)
-			free(FDSBIOS);
-		FDSBIOS = NULL;
+	if (extract_fds_bios_from_fp(fp, FDSBIOS)) {
+		/* Direct 8 KB / wrapped FDS BIOS load -> boot FDS BIOS standby with empty drive */
+		struct md5_context bios_md5;
+		SetupCartPRGMapping(0, FDSBIOS, FDSBIOSsize, 0);
+		md5_starts(&bios_md5);
+		md5_update(&bios_md5, FDSBIOS, FDSBIOSsize);
+		md5_finish(&bios_md5, GameInfo->MD5);
+
+		TotalSides = 0;
+		FDSROMSize = OKUSAN_FDS_MAX_SIDES * BYTES_PER_SIDE;
+		FDSROM = (uint8_t*)FCEU_malloc(FDSROMSize);
+		if (!FDSROM) {
+			FreeFDSMemory();
+			return 0;
+		}
+		memset(FDSROM, 0, FDSROMSize);
+		for (x = 0; x < OKUSAN_FDS_MAX_SIDES; x++)
+			diskdata[x] = &FDSROM[x * BYTES_PER_SIDE];
+		bios_standby = 1;
+	} else {
+		FCEUFILE *zp;
+		char *fn = FCEU_MakeFName(FCEUMKF_FDSROM, 0, 0);
+
+		if (!(zp = FCEU_fopen(fn, NULL, 0))) {
+			FCEU_PrintError("FDS BIOS ROM image missing!\n");
+			FCEUD_DispMessage(RETRO_LOG_ERROR, 3000, "FDS BIOS image (disksys.rom) missing");
+			free(fn);
+			FreeFDSMemory();
+			return 0;
+		}
+		free(fn);
+
+		if (FCEU_fread(FDSBIOS, 1, FDSBIOSsize, zp) != FDSBIOSsize) {
+			FCEU_fclose(zp);
+			FreeFDSMemory();
+			FCEU_PrintError("Error reading FDS BIOS ROM image.\n");
+			FCEUD_DispMessage(RETRO_LOG_ERROR, 3000, "Error reading FDS BIOS image (disksys.rom)");
+			return 0;
+		}
 		FCEU_fclose(zp);
-		FCEU_PrintError("Error reading FDS BIOS ROM image.\n");
-		FCEUD_DispMessage(RETRO_LOG_ERROR, 3000, "Error reading FDS BIOS image (disksys.rom)");
-		return 0;
-	}
 
-	FCEU_fclose(zp);
-
-	FCEU_fseek(fp, 0, SEEK_SET);
-
-	if (!SubLoad(fp)) {
-		if (FDSBIOS)
-			free(FDSBIOS);
-		FDSBIOS = NULL;
-		return(0);
-	}
-
-	for (x = 0; x < TotalSides; x++) {
-		diskdatao[x] = (uint8_t*)FCEU_malloc(65500);
-		if (!diskdatao[x]) {
-			uint32_t y;
-			for (y = 0; y < x; y++) {
-				free(diskdatao[y]);
-				diskdatao[y] = NULL;
-			}
-			if (FDSBIOS)
-				free(FDSBIOS);
-			FDSBIOS = NULL;
-			free(FDSROM);
-			FDSROM = NULL;
+		SetupCartPRGMapping(0, FDSBIOS, FDSBIOSsize, 0);
+		FCEU_fseek(fp, 0, SEEK_SET);
+		if (!SubLoad(fp)) {
+			FreeFDSMemory();
 			return(0);
 		}
-		memcpy(diskdatao[x], diskdata[x], 65500);
 	}
-	
+
+	diskdatao_buf = (uint8_t*)FCEU_malloc(OKUSAN_FDS_MAX_SIDES * BYTES_PER_SIDE);
+	if (!diskdatao_buf) {
+		FreeFDSMemory();
+		return(0);
+	}
+	memset(diskdatao_buf, 0, OKUSAN_FDS_MAX_SIDES * BYTES_PER_SIDE);
+	for (x = 0; x < OKUSAN_FDS_MAX_SIDES; x++) {
+		diskdatao[x] = &diskdatao_buf[x * BYTES_PER_SIDE];
+		if (x < TotalSides)
+			memcpy(diskdatao[x], diskdata[x], BYTES_PER_SIDE);
+	}
+
 	DiskWritten = 1;
 
 	GameInfo->type = GIT_FDS;
@@ -750,16 +932,22 @@ int FDSLoad(const char *name, FCEUFILE *fp) {
 
 	SelectDisk = 0;
 	InDisk = 255;
+	okusan_fds_active = 1;
+	okusan_fds_pending_side = -1;
+	okusan_fds_delayed_insert_frames = 0;
+	okusan_fds_rw_decay = 0;
+	okusan_fds_seek_seq = 0;
+	okusan_fds_latch_seq = 0;
+	okusan_fds_fault_mode = OKUSAN_FDS_FAULT_NONE;
+	okusan_fds_fault_motor_frames = 0;
+	okusan_fds_err01_tripped = 0;
 
 	ResetExState(PreSave, PostSave);
 	FDSSoundStateAdd();
 
-	for (x = 0; x < TotalSides; x++) {
+	AddExState(&TotalSides, 4, 1, "TSID");
+	for (x = 0; x < OKUSAN_FDS_MAX_SIDES; x++) {
 		char temp[5];
-		/* TotalSides is capped to 8 above, so the formatted string is
-		 * at most "DDT8\0" - exactly fits temp[5]. sprintf is portable;
-		 * snprintf isn't on pre-MSVC2015 without linking
-		 * compat_snprintf.c. */
 		sprintf(temp, "DDT%d", x);
 		AddExState(diskdata[x], 65500, 0, temp);
 	}
@@ -804,10 +992,14 @@ int FDSLoad(const char *name, FCEUFILE *fp) {
 
 	SetupCartMirroring(0, 0, 0);
 
-	FCEU_printf(" Code         : %02x\n", diskdata[0][0xf]);
-	FCEU_printf(" Manufacturer : %s\n", getManufacturer(diskdata[0][0xf]));
-	FCEU_printf(" # of Sides   : %d\n", TotalSides);
-	FCEU_printf(" ROM MD5      : 0x%s\n", md5_asciistr(GameInfo->MD5));
+	if (bios_standby) {
+		FCEU_printf(" FDS BIOS     : standby (no disk inserted)\n");
+	} else {
+		FCEU_printf(" Code         : %02x\n", diskdata[0][0xf]);
+		FCEU_printf(" Manufacturer : %s\n", getManufacturer(diskdata[0][0xf]));
+		FCEU_printf(" # of Sides   : %d\n", TotalSides);
+		FCEU_printf(" ROM MD5      : 0x%s\n", md5_asciistr(GameInfo->MD5));
+	}
 
 	FCEUI_SetVidSystem(0);
 
@@ -815,15 +1007,227 @@ int FDSLoad(const char *name, FCEUFILE *fp) {
 }
 
 void FDSClose(void) {
-	uint32_t x;
-
-	if (!DiskWritten) return;
-
-	for (x = 0; x < TotalSides; x++)
-		if (diskdatao[x]) {
-			free(diskdatao[x]);
-			diskdatao[x] = 0;
-		}
+	okusan_fds_active = 0;
+	okusan_fds_pending_side = -1;
+	okusan_fds_delayed_insert_frames = 0;
+	okusan_fds_rw_decay = 0;
+	okusan_fds_seek_seq = 0;
+	okusan_fds_latch_seq = 0;
+	okusan_fds_fault_mode = OKUSAN_FDS_FAULT_NONE;
+	okusan_fds_fault_motor_frames = 0;
+	okusan_fds_err01_tripped = 0;
+	TotalSides = 0;
+	InDisk = 255;
+	SelectDisk = 0;
 
 	FreeFDSMemory();
+}
+
+__attribute__((visibility("default")))
+void okusan_fds_tick_frame(void) {
+	if (!okusan_fds_active) {
+		okusan_fds_rw_decay = 0;
+		return;
+	}
+
+	if (okusan_fds_delayed_insert_frames > 0) {
+		okusan_fds_delayed_insert_frames--;
+		if (okusan_fds_delayed_insert_frames == 0 && okusan_fds_pending_side >= 0) {
+			if ((uint32_t)okusan_fds_pending_side < TotalSides) {
+				InDisk = (uint8_t)okusan_fds_pending_side;
+				SelectDisk = InDisk;
+				mapperFDS_block = DSK_INIT;
+				mapperFDS_blockstart = 0;
+				mapperFDS_blocklen = 0;
+				mapperFDS_diskaddr = 0;
+				okusan_fds_latch_seq++;
+			}
+			okusan_fds_pending_side = -1;
+		}
+	}
+
+	if (okusan_fds_fault_mode != OKUSAN_FDS_FAULT_NONE) {
+		int motor_on = (InDisk != 255) && ((mapperFDS_control & 0x01) != 0);
+		if (motor_on && okusan_fds_fault_motor_frames < 1000) {
+			okusan_fds_fault_motor_frames++;
+		}
+	}
+
+	if (okusan_fds_rw_decay > 0) {
+		okusan_fds_rw_decay--;
+	}
+}
+
+__attribute__((visibility("default")))
+int okusan_fds_is_active(void) {
+	return okusan_fds_active;
+}
+
+__attribute__((visibility("default")))
+void okusan_fds_get_status(int *out_inserted_side, int *out_total_sides,
+                           int *out_motor_on, int *out_rw_activity,
+                           uint32_t *out_seek_seq, uint32_t *out_latch_seq,
+                           int *out_fault_mode) {
+	int inserted = (okusan_fds_active && InDisk != 255 && InDisk < TotalSides) ? (int)InDisk : -1;
+	int motor = (okusan_fds_active && inserted >= 0 && (mapperFDS_control & 0x01) != 0) ? 1 : 0;
+	if (out_inserted_side) *out_inserted_side = inserted;
+	if (out_total_sides)   *out_total_sides   = okusan_fds_active ? (int)TotalSides : 0;
+	if (out_motor_on)      *out_motor_on      = motor;
+	if (out_rw_activity)   *out_rw_activity   = (okusan_fds_active && okusan_fds_rw_decay > 0) ? 1 : 0;
+	if (out_seek_seq)      *out_seek_seq      = okusan_fds_seek_seq;
+	if (out_latch_seq)     *out_latch_seq     = okusan_fds_latch_seq;
+	if (out_fault_mode)    *out_fault_mode    = okusan_fds_fault_mode;
+}
+
+__attribute__((visibility("default")))
+int okusan_fds_hot_swap_disk(const uint8_t *data, uint32_t size) {
+	uint32_t sides = 0;
+	uint32_t offset = 0;
+	uint32_t x;
+	int was_inserted;
+
+	if (!okusan_fds_active || !data || size < 16 || !FDSROM || !diskdatao_buf)
+		return 0;
+
+	if (memcmp(data, "FDS\x1a", 4) == 0) {
+		sides = data[4];
+		offset = 16;
+	} else if (memcmp(data + 1, "*NINTENDO-HVC*", 14) == 0) {
+		sides = (size < BYTES_PER_SIDE) ? 1 : (size / BYTES_PER_SIDE);
+		offset = 0;
+	} else {
+		return 0;
+	}
+
+	if (sides < 1) sides = 1;
+	if (sides > OKUSAN_FDS_MAX_SIDES) sides = OKUSAN_FDS_MAX_SIDES;
+
+	memset(FDSROM, 0, OKUSAN_FDS_MAX_SIDES * BYTES_PER_SIDE);
+	memset(diskdatao_buf, 0, OKUSAN_FDS_MAX_SIDES * BYTES_PER_SIDE);
+
+	for (x = 0; x < sides; x++) {
+		uint32_t src_off = offset + x * BYTES_PER_SIDE;
+		if (src_off < size) {
+			uint32_t avail = size - src_off;
+			if (avail > BYTES_PER_SIDE) avail = BYTES_PER_SIDE;
+			memcpy(diskdata[x], data + src_off, avail);
+			memcpy(diskdatao[x], diskdata[x], BYTES_PER_SIDE);
+		}
+	}
+
+	okusan_fds_fault_mode = OKUSAN_FDS_FAULT_NONE;
+	okusan_fds_fault_motor_frames = 0;
+	okusan_fds_err01_tripped = 0;
+	okusan_fds_pending_side = -1;
+	okusan_fds_delayed_insert_frames = 0;
+
+	was_inserted = (InDisk != 255);
+	TotalSides = sides;
+	SelectDisk = 0;
+	mapperFDS_block = DSK_INIT;
+	mapperFDS_blockstart = 0;
+	mapperFDS_blocklen = 0;
+	mapperFDS_diskaddr = 0;
+
+	if (was_inserted) {
+		/* Brief physical swap gap so BIOS/game sees card removal before new card arrives */
+		InDisk = 255;
+		okusan_fds_pending_side = 0;
+		okusan_fds_delayed_insert_frames = 34;
+	} else {
+		InDisk = 0;
+	}
+	okusan_fds_latch_seq++;
+	return (int)TotalSides;
+}
+
+__attribute__((visibility("default")))
+void okusan_fds_eject_disk(void) {
+	if (!okusan_fds_active) return;
+	okusan_fds_fault_mode = OKUSAN_FDS_FAULT_NONE;
+	okusan_fds_fault_motor_frames = 0;
+	okusan_fds_err01_tripped = 0;
+	okusan_fds_pending_side = -1;
+	okusan_fds_delayed_insert_frames = 0;
+	if (InDisk != 255) {
+		InDisk = 255;
+		okusan_fds_latch_seq++;
+	}
+}
+
+__attribute__((visibility("default")))
+void okusan_fds_set_side(int side) {
+	if (!okusan_fds_active || TotalSides == 0) return;
+	if (side < 0) side = 0;
+	if ((uint32_t)side >= TotalSides) side = (int)TotalSides - 1;
+
+	okusan_fds_fault_mode = OKUSAN_FDS_FAULT_NONE;
+	okusan_fds_fault_motor_frames = 0;
+	okusan_fds_err01_tripped = 0;
+	SelectDisk = (uint8_t)side;
+
+	if (InDisk != 255) {
+		InDisk = 255;
+		okusan_fds_pending_side = side;
+		okusan_fds_delayed_insert_frames = 34;
+		okusan_fds_latch_seq++;
+	} else {
+		okusan_fds_pending_side = -1;
+		okusan_fds_delayed_insert_frames = 0;
+		InDisk = (uint8_t)side;
+		mapperFDS_block = DSK_INIT;
+		mapperFDS_blockstart = 0;
+		mapperFDS_blocklen = 0;
+		mapperFDS_diskaddr = 0;
+		okusan_fds_latch_seq++;
+	}
+}
+
+__attribute__((visibility("default")))
+void okusan_fds_clear_fault(void) {
+	okusan_fds_fault_mode = OKUSAN_FDS_FAULT_NONE;
+	okusan_fds_fault_motor_frames = 0;
+	okusan_fds_err01_tripped = 0;
+}
+
+__attribute__((visibility("default")))
+int okusan_fds_trigger_random_fault(uint32_t rng_seed) {
+	int target_side;
+	uint32_t mixed;
+	int mode;
+
+	if (!okusan_fds_active || TotalSides == 0)
+		return 0;
+
+	target_side = (InDisk != 255 && InDisk < TotalSides)
+	              ? (int)InDisk
+	              : (SelectDisk < TotalSides ? (int)SelectDisk : 0);
+
+	okusan_fds_fault_rng_ctr += 0x9E3779B9u;
+	mixed = rng_seed ^ okusan_fds_fault_rng_ctr;
+	mixed ^= mixed >> 16;
+	mixed *= 0x7FEB352Du;
+	mixed ^= mixed >> 15;
+	mixed *= 0x846CA68Bu;
+	mixed ^= mixed >> 16;
+
+	/* Cycle across all 9 real read-time FDS hardware/BIOS faults (ERR. 01..28) */
+	mode = 1 + (int)(mixed % 9u);
+
+	okusan_fds_fault_mode = mode;
+	okusan_fds_fault_motor_frames = 0;
+	okusan_fds_err01_tripped = 0;
+	InDisk = 255;
+	okusan_fds_pending_side = target_side;
+	okusan_fds_delayed_insert_frames = 20;
+	okusan_fds_latch_seq++;
+	return mode;
+}
+
+__attribute__((visibility("default")))
+uint8_t *okusan_fds_get_side_ptr(int side, const uint8_t **out_orig_ptr) {
+	if (!okusan_fds_active || side < 0 || (uint32_t)side >= TotalSides)
+		return NULL;
+	if (out_orig_ptr) *out_orig_ptr = diskdatao[side];
+	return diskdata[side];
 }

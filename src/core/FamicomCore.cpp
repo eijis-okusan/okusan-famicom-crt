@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <fstream>
@@ -108,6 +109,20 @@ struct FamicomCore::CoreState {
     int (*okusan_cart_vcc_mv)() = nullptr;
     int (*okusan_get_cpu_jammed)() = nullptr;
     uint16_t (*okusan_get_cpu_pc)() = nullptr;
+
+    // Famicom 3D System ($4016 OUT1) shutter telemetry
+    int (*okusan_get_3d_system_active)() = nullptr;
+    int (*okusan_get_3d_current_eye)() = nullptr;
+
+    // Famicom Disk System (HVC-022) live drive & fault extensions
+    int (*okusan_fds_is_active)() = nullptr;
+    void (*okusan_fds_get_status)(int *, int *, int *, int *, uint32_t *, uint32_t *, int *) = nullptr;
+    int (*okusan_fds_hot_swap_disk)(const uint8_t *, uint32_t) = nullptr;
+    void (*okusan_fds_eject_disk)() = nullptr;
+    void (*okusan_fds_set_side)(int) = nullptr;
+    void (*okusan_fds_clear_fault)() = nullptr;
+    int (*okusan_fds_trigger_random_fault)(uint32_t) = nullptr;
+    uint8_t *(*okusan_fds_get_side_ptr)(int, const uint8_t **) = nullptr;
 
     static CoreState *activeInstance;
 
@@ -235,6 +250,16 @@ struct FamicomCore::CoreState {
         okusan_cart_vcc_mv = nullptr;
         okusan_get_cpu_jammed = nullptr;
         okusan_get_cpu_pc = nullptr;
+        okusan_get_3d_system_active = nullptr;
+        okusan_get_3d_current_eye = nullptr;
+        okusan_fds_is_active = nullptr;
+        okusan_fds_get_status = nullptr;
+        okusan_fds_hot_swap_disk = nullptr;
+        okusan_fds_eject_disk = nullptr;
+        okusan_fds_set_side = nullptr;
+        okusan_fds_clear_fault = nullptr;
+        okusan_fds_trigger_random_fault = nullptr;
+        okusan_fds_get_side_ptr = nullptr;
     }
 };
 
@@ -305,6 +330,16 @@ bool FamicomCore::load(const std::string &coreLibraryPath,
     resolveSymbol(state_->libraryHandle, "okusan_cart_vcc_mv", state_->okusan_cart_vcc_mv);
     resolveSymbol(state_->libraryHandle, "okusan_get_cpu_jammed", state_->okusan_get_cpu_jammed);
     resolveSymbol(state_->libraryHandle, "okusan_get_cpu_pc", state_->okusan_get_cpu_pc);
+    resolveSymbol(state_->libraryHandle, "okusan_get_3d_system_active", state_->okusan_get_3d_system_active);
+    resolveSymbol(state_->libraryHandle, "okusan_get_3d_current_eye", state_->okusan_get_3d_current_eye);
+    resolveSymbol(state_->libraryHandle, "okusan_fds_is_active", state_->okusan_fds_is_active);
+    resolveSymbol(state_->libraryHandle, "okusan_fds_get_status", state_->okusan_fds_get_status);
+    resolveSymbol(state_->libraryHandle, "okusan_fds_hot_swap_disk", state_->okusan_fds_hot_swap_disk);
+    resolveSymbol(state_->libraryHandle, "okusan_fds_eject_disk", state_->okusan_fds_eject_disk);
+    resolveSymbol(state_->libraryHandle, "okusan_fds_set_side", state_->okusan_fds_set_side);
+    resolveSymbol(state_->libraryHandle, "okusan_fds_clear_fault", state_->okusan_fds_clear_fault);
+    resolveSymbol(state_->libraryHandle, "okusan_fds_trigger_random_fault", state_->okusan_fds_trigger_random_fault);
+    resolveSymbol(state_->libraryHandle, "okusan_fds_get_side_ptr", state_->okusan_fds_get_side_ptr);
 
     CoreState::activeInstance = state_;
     state_->retro_set_environment(CoreState::onEnvironment);
@@ -433,6 +468,144 @@ bool FamicomCore::isCpuJammed() const {
 
 uint16_t FamicomCore::cpuProgramCounter() const {
     return (state_->loaded && state_->okusan_get_cpu_pc) ? state_->okusan_get_cpu_pc() : 0;
+}
+
+bool FamicomCore::is3dSystemActive() const {
+    return state_->loaded && state_->okusan_get_3d_system_active && (state_->okusan_get_3d_system_active() != 0);
+}
+
+int FamicomCore::current3dEye() const {
+    return (state_->loaded && state_->okusan_get_3d_current_eye) ? state_->okusan_get_3d_current_eye() : 0;
+}
+
+bool FamicomCore::isFdsActive() const {
+    return state_->loaded && state_->okusan_fds_is_active && (state_->okusan_fds_is_active() != 0);
+}
+
+FdsDriveStatus FamicomCore::fdsDriveStatus() const {
+    FdsDriveStatus status{};
+    if (!state_->loaded || !state_->okusan_fds_is_active || !state_->okusan_fds_get_status) {
+        return status;
+    }
+    status.active = (state_->okusan_fds_is_active() != 0);
+    if (!status.active) return status;
+
+    int motor = 0;
+    int rw = 0;
+    state_->okusan_fds_get_status(&status.insertedSide, &status.totalSides,
+                                  &motor, &rw,
+                                  &status.seekSeq, &status.latchSeq, &status.faultMode);
+    status.motorOn = (motor != 0);
+    status.rwActivity = (rw != 0);
+    return status;
+}
+
+int FamicomCore::hotSwapFdsDisk(const std::string &path) {
+    if (!state_->loaded || !state_->okusan_fds_hot_swap_disk) return 0;
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs.is_open()) return 0;
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(ifs)), {});
+    if (bytes.empty()) return 0;
+    return state_->okusan_fds_hot_swap_disk(bytes.data(), static_cast<uint32_t>(bytes.size()));
+}
+
+void FamicomCore::ejectFdsDisk() {
+    if (state_->loaded && state_->okusan_fds_eject_disk) {
+        state_->okusan_fds_eject_disk();
+    }
+}
+
+void FamicomCore::setFdsDiskSide(int side) {
+    if (state_->loaded && state_->okusan_fds_set_side) {
+        state_->okusan_fds_set_side(side);
+    }
+}
+
+void FamicomCore::clearFdsFault() {
+    if (state_->loaded && state_->okusan_fds_clear_fault) {
+        state_->okusan_fds_clear_fault();
+    }
+}
+
+int FamicomCore::triggerRandomFdsFault() {
+    if (!state_->loaded || !state_->okusan_fds_trigger_random_fault) return 0;
+    return state_->okusan_fds_trigger_random_fault(static_cast<uint32_t>(arc4random()));
+}
+
+bool FamicomCore::saveFdsDiskDiff(const std::string &savePath) const {
+    if (!state_->loaded || !state_->okusan_fds_get_side_ptr || !isFdsActive()) return false;
+    const FdsDriveStatus status = fdsDriveStatus();
+    if (status.totalSides <= 0 || status.totalSides > 8) return false;
+
+    constexpr size_t kSideBytes = 65500;
+    std::vector<uint8_t> diffBuf(kSideBytes);
+    std::vector<uint8_t> payload;
+    const char magic[8] = {'O', 'F', 'D', 'S', 'D', 'I', 'F', 'F'};
+    payload.insert(payload.end(), magic, magic + 8);
+    const uint32_t sideCount = static_cast<uint32_t>(status.totalSides);
+    payload.push_back(static_cast<uint8_t>(sideCount & 0xFFu));
+    payload.push_back(static_cast<uint8_t>((sideCount >> 8) & 0xFFu));
+    payload.push_back(static_cast<uint8_t>((sideCount >> 16) & 0xFFu));
+    payload.push_back(static_cast<uint8_t>((sideCount >> 24) & 0xFFu));
+
+    bool anyDiff = false;
+    for (int s = 0; s < status.totalSides; ++s) {
+        const uint8_t *orig = nullptr;
+        const uint8_t *cur = state_->okusan_fds_get_side_ptr(s, &orig);
+        bool dirty = false;
+        if (cur && orig) {
+            for (size_t i = 0; i < kSideBytes; ++i) {
+                const uint8_t d = cur[i] ^ orig[i];
+                diffBuf[i] = d;
+                if (d != 0) dirty = true;
+            }
+        }
+        payload.push_back(dirty ? 1 : 0);
+        if (dirty) {
+            anyDiff = true;
+            payload.insert(payload.end(), diffBuf.begin(), diffBuf.end());
+        }
+    }
+
+    if (!anyDiff) return true;
+    std::ofstream ofs(savePath, std::ios::binary);
+    if (!ofs.is_open()) return false;
+    ofs.write(reinterpret_cast<const char *>(payload.data()), static_cast<std::streamsize>(payload.size()));
+    return ofs.good();
+}
+
+bool FamicomCore::loadFdsDiskDiff(const std::string &savePath) {
+    if (!state_->loaded || !state_->okusan_fds_get_side_ptr || !isFdsActive()) return false;
+    std::ifstream ifs(savePath, std::ios::binary);
+    if (!ifs.is_open()) return false;
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(ifs)), {});
+    if (bytes.size() < 12 || std::memcmp(bytes.data(), "OFDSDIFF", 8) != 0) return false;
+
+    const uint32_t sideCount = static_cast<uint32_t>(bytes[8]) |
+                               (static_cast<uint32_t>(bytes[9]) << 8) |
+                               (static_cast<uint32_t>(bytes[10]) << 16) |
+                               (static_cast<uint32_t>(bytes[11]) << 24);
+    const FdsDriveStatus status = fdsDriveStatus();
+    if (sideCount == 0 || sideCount > static_cast<uint32_t>(status.totalSides)) return false;
+
+    constexpr size_t kSideBytes = 65500;
+    size_t pos = 12;
+    for (uint32_t s = 0; s < sideCount; ++s) {
+        if (pos >= bytes.size()) return false;
+        const uint8_t dirty = bytes[pos++];
+        if (dirty) {
+            if (pos + kSideBytes > bytes.size()) return false;
+            const uint8_t *orig = nullptr;
+            uint8_t *cur = state_->okusan_fds_get_side_ptr(static_cast<int>(s), &orig);
+            if (cur && orig) {
+                for (size_t i = 0; i < kSideBytes; ++i) {
+                    cur[i] = orig[i] ^ bytes[pos + i];
+                }
+            }
+            pos += kSideBytes;
+        }
+    }
+    return true;
 }
 
 void FamicomCore::runFrame(uint32_t pad1Mask, const AudioFrameSink &audioSink) {

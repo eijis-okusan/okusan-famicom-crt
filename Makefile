@@ -11,7 +11,7 @@ ARCH       ?= $(shell uname -m)
 CXX        := clang++
 CXXFLAGS   := -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc -DGL_SILENCE_DEPRECATION -arch $(ARCH)
 OBJCFLAGS  := -fobjc-arc
-FRAMEWORKS := -framework Cocoa -framework OpenGL -framework AudioToolbox -framework GameController -framework UniformTypeIdentifiers
+FRAMEWORKS := -framework Cocoa -framework OpenGL -framework AudioToolbox -framework GameController -framework QuartzCore -framework UniformTypeIdentifiers
 
 CPP_SRCS   := src/core/FamicomCore.cpp \
               src/core/CartridgeFaultInjector.cpp \
@@ -21,11 +21,15 @@ MM_SRCS    := src/app/main.mm \
               src/app/AppLocalization.mm \
               src/app/AppMenuController.mm \
               src/app/AppPreferences.mm \
+              src/app/EmulationPacer.mm \
               src/app/LicensesWindow.mm \
               src/audio/MacAudioEngine.mm \
               src/video/CrtScreenView.mm \
+              src/video/CrtShaderProgram.mm \
+              src/video/StatusBanner.mm \
               src/hud/CartConnectorHud.mm \
               src/input/InputBindings.mm \
+              src/input/InputPoller.mm \
               src/input/ControllerSettingsWindow.mm
 
 CPP_OBJS   := $(patsubst src/%.cpp,$(BUILD_DIR)/obj/%.o,$(CPP_SRCS))

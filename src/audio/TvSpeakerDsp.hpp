@@ -176,7 +176,31 @@ public:
         tunerSnowLpf_.reset();
 
         syncPhase_ = 0.0;
-        humPhase_ = 0.0;
+        syncPhaseStep_ = 59.94 / sampleRate_;
+        powerStep_ = 1.0f / static_cast<float>(sampleRate_ * 0.020);
+        resetStep_ = 1.0f / static_cast<float>(sampleRate_ * 0.008);
+        mixStep_ = 1.0f / static_cast<float>(sampleRate_ * 0.012);
+
+        const double humOmega = 2.0 * M_PI * 120.0 / sampleRate_;
+        humCosStep_ = static_cast<float>(std::cos(humOmega));
+        humSinStep_ = static_cast<float>(std::sin(humOmega));
+        humCos_ = 1.0f;
+        humSin_ = 0.0f;
+        humNormCounter_ = 0;
+
+        for (size_t i = 0; i <= kSyncLutSize; ++i) {
+            const float fieldPos = static_cast<float>(i) / static_cast<float>(kSyncLutSize);
+            const float vSyncPulse = std::exp(-fieldPos * 38.0f) - 0.58f * std::exp(-fieldPos * 165.0f);
+            const float fieldSawtooth = 0.5f - fieldPos;
+            syncBaseLut_[i] = 0.024f * vSyncPulse + 0.0075f * fieldSawtooth;
+
+            const float omega = static_cast<float>(2.0 * M_PI) * fieldPos;
+            const float carrierHarmonics = 0.38f * std::sin(12.0f * omega)
+                                         + 0.36f * std::sin(18.0f * omega)
+                                         + 0.28f * std::sin(26.0f * omega);
+            carrierGainLut_[i] = 0.020f * (0.35f + 0.65f * carrierHarmonics);
+        }
+
         buzzEnvelope_ = 0.0f;
         bandEnvelope_ = 0.0f;
         rfWetMix_ = 0.0f;
@@ -197,14 +221,12 @@ public:
                              float &outL, float &outR) {
         // Exponential/linear short ramps prevent DC pop when toggling POWER (20 ms) or holding RESET (8 ms).
         const float targetPowerGate = consolePowered_ ? 1.0f : 0.0f;
-        const float powerStep = 1.0f / static_cast<float>(sampleRate_ * 0.020);
-        if (powerGate_ < targetPowerGate) powerGate_ = std::min(targetPowerGate, powerGate_ + powerStep);
-        else if (powerGate_ > targetPowerGate) powerGate_ = std::max(targetPowerGate, powerGate_ - powerStep);
+        if (powerGate_ < targetPowerGate) powerGate_ = std::min(targetPowerGate, powerGate_ + powerStep_);
+        else if (powerGate_ > targetPowerGate) powerGate_ = std::max(targetPowerGate, powerGate_ - powerStep_);
 
         const float targetResetGate = resetHeld_ ? 0.0f : 1.0f;
-        const float resetStep = 1.0f / static_cast<float>(sampleRate_ * 0.008);
-        if (resetGate_ < targetResetGate) resetGate_ = std::min(targetResetGate, resetGate_ + resetStep);
-        else if (resetGate_ > targetResetGate) resetGate_ = std::max(targetResetGate, resetGate_ - resetStep);
+        if (resetGate_ < targetResetGate) resetGate_ = std::min(targetResetGate, resetGate_ + resetStep_);
+        else if (resetGate_ > targetResetGate) resetGate_ = std::max(targetResetGate, resetGate_ - resetStep_);
 
         const bool gameRunning = consolePowered_ && !resetHeld_;
         if (gameRunning) {
@@ -220,9 +242,8 @@ public:
 
         // 12 ms crossfade when switching RGB <-> RF monitor presets.
         const float targetWet = rfEnabled ? 1.0f : 0.0f;
-        const float mixStep = 1.0f / static_cast<float>(sampleRate_ * 0.012);
-        if (rfWetMix_ < targetWet) rfWetMix_ = std::min(targetWet, rfWetMix_ + mixStep);
-        else if (rfWetMix_ > targetWet) rfWetMix_ = std::max(targetWet, rfWetMix_ - mixStep);
+        if (rfWetMix_ < targetWet) rfWetMix_ = std::min(targetWet, rfWetMix_ + mixStep_);
+        else if (rfWetMix_ > targetWet) rfWetMix_ = std::max(targetWet, rfWetMix_ - mixStep_);
 
         if (rfWetMix_ <= 0.0001f) {
             outL = gatedL;
@@ -233,7 +254,7 @@ public:
         const float mono = 0.5f * (gatedL + gatedR);
 
         // Advance NTSC 59.94 Hz vertical sweep to sample per-band video load into the sound carrier.
-        syncPhase_ += 59.94 / sampleRate_;
+        syncPhase_ += syncPhaseStep_;
         if (syncPhase_ >= 1.0) syncPhase_ -= 1.0;
         const float fieldPos = static_cast<float>(syncPhase_);
 
@@ -249,17 +270,23 @@ public:
             : 0.0f;
         buzzEnvelope_ += (totalVideoDrive - buzzEnvelope_) * 0.0025f;
 
-        const float vSyncPulse = std::exp(-fieldPos * 38.0f) - 0.58f * std::exp(-fieldPos * 165.0f);
-        const float fieldSawtooth = 0.5f - fieldPos;
-        const float omega = static_cast<float>(2.0 * M_PI) * fieldPos;
-        const float carrierHarmonics = 0.38f * std::sin(12.0f * omega)
-                                     + 0.36f * std::sin(18.0f * omega)
-                                     + 0.28f * std::sin(26.0f * omega);
-        const float videoBuzz = std::max(0.0f, bandEnvelope_) * (0.35f + 0.65f * carrierHarmonics);
+        const float lutPos = fieldPos * static_cast<float>(kSyncLutSize);
+        const size_t lutIdx = std::min(kSyncLutSize - 1, static_cast<size_t>(lutPos));
+        const float lutFrac = lutPos - static_cast<float>(lutIdx);
+        const float syncWave = syncBaseLut_[lutIdx] + (syncBaseLut_[lutIdx + 1] - syncBaseLut_[lutIdx]) * lutFrac;
+        const float carrierGain = carrierGainLut_[lutIdx] + (carrierGainLut_[lutIdx + 1] - carrierGainLut_[lutIdx]) * lutFrac;
+        const float videoCrosstalkBuzz = std::max(0.0f, bandEnvelope_) * carrierGain * powerGate_;
 
-        humPhase_ += 120.0 / sampleRate_;
-        if (humPhase_ >= 1.0) humPhase_ -= 1.0;
-        const float powerHum = std::sin(static_cast<float>(2.0 * M_PI * humPhase_));
+        const float nextCos = humCos_ * humCosStep_ - humSin_ * humSinStep_;
+        const float nextSin = humSin_ * humCosStep_ + humCos_ * humSinStep_;
+        humCos_ = nextCos;
+        humSin_ = nextSin;
+        if ((++humNormCounter_ & 255u) == 0u) {
+            const float invLen = 0.5f * (3.0f - (humCos_ * humCos_ + humSin_ * humSin_));
+            humCos_ *= invLen;
+            humSin_ *= invLen;
+        }
+        const float powerHum = humSin_;
 
         const float whiteNoise = nextNoiseSample();
         const float demodHiss = hissLpf_.process(whiteNoise);
@@ -269,9 +296,9 @@ public:
         const float buzzScale = (0.45f + 1.25f * buzzEnvelope_) * powerGate_;
         const float hissMasking = 1.08f - 0.28f * std::clamp(buzzEnvelope_, 0.0f, 1.0f);
 
-        const float baseBuzz = (0.024f * vSyncPulse + 0.0075f * fieldSawtooth) * buzzScale;
+        const float baseBuzz = syncWave * buzzScale;
         const float rfInterference =
-            (baseBuzz + 0.020f * videoBuzz * powerGate_ + 0.0025f * powerHum * powerGate_) * signalScale +
+            (baseBuzz + videoCrosstalkBuzz + 0.0025f * powerHum * powerGate_) * signalScale +
             (0.0068f * demodHiss * hissMasking) * snowScale * powerGate_;
 
         float speakerOut = mono + rfInterference;
@@ -281,7 +308,7 @@ public:
         speakerOut = coneResonance_.process(speakerOut);
         speakerOut = lpfStage1_.process(speakerOut);
         speakerOut = lpfStage2_.process(speakerOut);
-        speakerOut = std::tanh(speakerOut * 1.48f) * 0.85f;
+        speakerOut = fastTanh(speakerOut * 1.48f) * 0.85f;
 
         // Open-tuner snow fades in inversely with consoleGate when powered off or browned out.
         const float tunerSnow = tunerSnowLpf_.process(tunerSnowHpf_.process(whiteNoise)) * (0.036f * snowScale);
@@ -297,6 +324,14 @@ public:
     }
 
 private:
+    static inline float fastTanh(float x) {
+        const float xc = std::clamp(x, -3.0f, 3.0f);
+        const float x2 = xc * xc;
+        return xc * (27.0f + x2) / (27.0f + 9.0f * x2);
+    }
+
+    static constexpr size_t kSyncLutSize = 1024;
+
     float nextNoiseSample() {
         rngState_ ^= rngState_ << 13;
         rngState_ ^= rngState_ >> 17;
@@ -316,7 +351,20 @@ private:
     BiquadFilter tunerSnowLpf_;
 
     double syncPhase_ = 0.0;
-    double humPhase_ = 0.0;
+    double syncPhaseStep_ = 59.94 / 48000.0;
+    float powerStep_ = 1.0f / 960.0f;
+    float resetStep_ = 1.0f / 384.0f;
+    float mixStep_ = 1.0f / 576.0f;
+
+    float humCosStep_ = 1.0f;
+    float humSinStep_ = 0.0f;
+    float humCos_ = 1.0f;
+    float humSin_ = 0.0f;
+    uint32_t humNormCounter_ = 0;
+
+    std::array<float, kSyncLutSize + 1> syncBaseLut_{};
+    std::array<float, kSyncLutSize + 1> carrierGainLut_{};
+
     float buzzEnvelope_ = 0.0f;
     float bandEnvelope_ = 0.0f;
     uint32_t rngState_ = 0x6D2B79F5u;
