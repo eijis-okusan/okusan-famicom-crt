@@ -159,6 +159,7 @@ make distclean   # Remove build/ and clean third_party/fceumm objects
 | `P` | Pause / resume emulation |
 | `F5` / `F8` | Quick Save / Quick Load |
 | `Cmd + 1` / `2` / `3` | RGB Monitor / Color RF / B&W RF Television |
+| `Cmd + 4` / `5` | Preset: RGB + Flat / Preset: RF + Curved & Noise |
 | `Cmd + D` | Toggle HDR CRT Luminance / Physical ABL (EDR) |
 | `Cmd + I` / `B` / `C` / `K` | Toggle 480i/240p / HV Bloom / Curvature / Slot Mask |
 | `Cmd + M` / `Cmd + F` | Mute Audio / Toggle Full Screen |

@@ -18,6 +18,28 @@ struct CrtDisplayConfig {
     float slotMask = 1.0f;     // Phosphor shadow/slot mask intensity (0.0 .. 1.5)
     float rfSnow = 1.0f;       // RF noise floor (0.0 .. 2.0)
     float rfSignal = 1.0f;     // RF interference / chroma artifact level (0.0 .. 2.0)
+
+    /// Returns a flat-screen RGB monitor preset while preserving interlace/HDR preferences.
+    static CrtDisplayConfig rgbFlatPreset(const CrtDisplayConfig &base) {
+        CrtDisplayConfig next = base;
+        next.rfMode = false;
+        next.monochrome = false;
+        next.curvature = 0.0f;
+        return next;
+    }
+
+    /// Returns a curved consumer Color RF TV preset with standard snow & interference enabled.
+    static CrtDisplayConfig rfCurvedNoisePreset(const CrtDisplayConfig &base) {
+        CrtDisplayConfig next = base;
+        next.rfMode = true;
+        next.monochrome = false;
+        next.curvature = 1.0f;
+        next.hvBloom = 1.0f;
+        next.slotMask = 1.0f;
+        next.rfSnow = 1.0f;
+        next.rfSignal = 1.0f;
+        return next;
+    }
 };
 
 /// Presentation modes for Famicom 3D System ($4016 OUT1 shutter) titles.

@@ -21,6 +21,8 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     NSMenuItem *_menuRgb;
     NSMenuItem *_menuRf;
     NSMenuItem *_menuBwRf;
+    NSMenuItem *_menuPresetRgbFlat;
+    NSMenuItem *_menuPresetRfCurvedNoise;
     NSMenuItem *_menuInterlaced;
     NSMenuItem *_menuHdr;
     NSMenuItem *_menuHvBloom;
@@ -155,6 +157,11 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     _menuRgb  = add(app_l10n::tr(@"RGB モニター接続", @"RGB Monitor"), @selector(selectRgbMode:), @"1");
     _menuRf   = add(app_l10n::tr(@"カラー RF テレビ接続", @"Color RF Television"), @selector(selectColorRfMode:), @"2");
     _menuBwRf = add(app_l10n::tr(@"白黒 RF テレビ (P4蛍光体)", @"B&W RF Television (P4 Phosphor)"), @selector(selectBwRfMode:), @"3");
+    [displayMenu addItem:[NSMenuItem separatorItem]];
+    _menuPresetRgbFlat       = add(app_l10n::tr(@"プリセット: RGB + フラット", @"Preset: RGB + Flat"),
+                                   @selector(selectPresetRgbFlat:), @"4");
+    _menuPresetRfCurvedNoise = add(app_l10n::tr(@"プリセット: RF + 湾曲・ノイズ付き", @"Preset: RF + Curved & Noise"),
+                                   @selector(selectPresetRfCurvedNoise:), @"5");
     [displayMenu addItem:[NSMenuItem separatorItem]];
 
     _menuInterlaced = add(app_l10n::tr(@"525本 480i インターレース (オフで 240p)",
@@ -356,6 +363,13 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     _menuRgb.state = !config.rfMode ? NSControlStateValueOn : NSControlStateValueOff;
     _menuRf.state = (config.rfMode && !config.monochrome) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuBwRf.state = isBwMode ? NSControlStateValueOn : NSControlStateValueOff;
+    _menuPresetRgbFlat.state = (!config.rfMode && config.curvature < 0.1f)
+                                   ? NSControlStateValueOn
+                                   : NSControlStateValueOff;
+    _menuPresetRfCurvedNoise.state = (config.rfMode && !config.monochrome &&
+                                      config.curvature > 0.1f && config.rfSnow > 0.1f)
+                                         ? NSControlStateValueOn
+                                         : NSControlStateValueOff;
     _menuInterlaced.state = config.interlaced ? NSControlStateValueOn : NSControlStateValueOff;
     _menuHdr.state = config.hdrEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     _menuHvBloom.state = (config.hvBloom > 0.1f) ? NSControlStateValueOn : NSControlStateValueOff;

@@ -158,6 +158,7 @@ make distclean   # build/ と third_party/fceumm の生成物を全削除
 | `P` | 一時停止 / 再開 |
 | `F5` / `F8` | クイックセーブ / クイックロード |
 | `Cmd + 1` / `2` / `3` | RGB モニター / カラー RF / 白黒 RF テレビ切替 |
+| `Cmd + 4` / `5` | プリセット：RGB + フラット / RF + 湾曲・ノイズ付き |
 | `Cmd + D` | HDR CRT ピーク強調（EDR / ABL）ON / OFF |
 | `Cmd + I` / `B` / `C` / `K` | 480i/240p・HV ブルーム・管面曲率・スロットマスク切替 |
 | `Cmd + M` / `Cmd + F` | ミュート / フルスクリーン切替 |

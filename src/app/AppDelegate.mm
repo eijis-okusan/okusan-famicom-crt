@@ -235,6 +235,14 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
 - (void)selectRgbMode:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = false; c.monochrome = false; }]; }
 - (void)selectColorRfMode:(id)sender { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = false; }]; }
 - (void)selectBwRfMode:(id)sender    { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = true;  }]; }
+- (void)selectPresetRgbFlat:(id)sender {
+    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c = CrtDisplayConfig::rgbFlatPreset(c); }];
+    [_screenView showStatusBannerText:app_l10n::tr(@"プリセット: RGB + フラット", @"Preset: RGB + Flat")];
+}
+- (void)selectPresetRfCurvedNoise:(id)sender {
+    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c = CrtDisplayConfig::rfCurvedNoisePreset(c); }];
+    [_screenView showStatusBannerText:app_l10n::tr(@"プリセット: RF + 湾曲・ノイズ付き", @"Preset: RF + Curved & Noise")];
+}
 - (void)toggleInterlaced:(id)sender  { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.interlaced = !c.interlaced; }]; }
 - (void)toggleHdr:(id)sender {
     [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.hdrEnabled = !c.hdrEnabled; }];
