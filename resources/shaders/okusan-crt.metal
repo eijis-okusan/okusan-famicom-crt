@@ -48,14 +48,13 @@ constant float kSrcGamma = 2.25f;
 constant float kBwSrcGamma = 2.02f;
 constant float kDisplayInvGamma = 1.0f / 2.2f;
 constant float kBeamSigmaX = 0.55f;
-constant float kBeamLoadKnee = 0.10f;
-constant float kHvSagExpansion = 0.022f;    // RGB monitor: tighter regulated HV
-constant float kRfHvSagExpansion = 0.052f;  // Consumer Color RF TV: ~4.7% white flash raster swell
-constant float kBwHvSagExpansion = 0.064f;  // 1970s B&W RF TV: looser flyback HV regulation
+constant float kBeamLoadKnee = 0.14f;
+constant float kHvSagExpansion = 0.015f;
+constant float kBwHvSagExpansion = 0.022f;
 constant float kNtscVisibleLines = 480.0f;
 constant float kPi = 3.14159265f;
 constant float kSubcarrierRadPerTexel = 2.09439510f; // 2 * pi / 3 per source pixel (~3.58 MHz)
-constant float kHvCapBlend = 0.62f;
+constant float kHvCapBlend = 0.58f;
 constant float3 kLumaWeights = float3(0.299f, 0.587f, 0.114f);
 constant float3 kGunConvergence = float3(-0.13f, 0.0f, 0.16f);
 constant float3 kP22Decay = float3(0.055f, 0.11f, 0.075f);
@@ -186,29 +185,18 @@ inline float sampleLinearLuma(texture2d<float> source, float2 texelCoord, float2
     return pow(max(y, 1e-6f), kBwSrcGamma);
 }
 
-inline float3 sampleHorizontalBeam(texture2d<float> origTex, float2 p, float row, float2 imgSz, float2 texSz, float whiteBloomAmt) {
+inline float3 sampleHorizontalBeam(texture2d<float> origTex, float2 p, float row, float2 imgSz, float2 texSz) {
     float center = floor(p.x + 0.5f);
     float3 energy = float3(0.0f);
     float3 total = float3(0.0f);
-    float3 whiteSpill = float3(0.0f);
     for (int i = -2; i <= 2; ++i) {
         float x = center + float(i);
-        float3 sampleLin = sampleLinearPixel(origTex, float2(x, row), imgSz, texSz, kSrcGamma);
-        float dx = p.x - x;
-        float3 dist = float3(dx) + kGunConvergence;
+        float3 dist = float3(p.x - x) + kGunConvergence;
         float3 weight = exp(-dist * dist / (2.0f * kBeamSigmaX * kBeamSigmaX));
-        energy += sampleLin * weight;
+        energy += sampleLinearPixel(origTex, float2(x, row), imgSz, texSz, kSrcGamma) * weight;
         total += weight;
-
-        // Cathode space-charge spot bloom: only bright high-luma pixels spill horizontally.
-        if (whiteBloomAmt > 0.001f) {
-            float lum = dot(sampleLin, kLumaWeights);
-            float whiteDrive = smoothstep(0.45f, 1.0f, lum);
-            float spillW = exp(-(dx * dx) / (2.0f * 1.15f * 1.15f));
-            whiteSpill += sampleLin * (whiteDrive * spillW);
-        }
     }
-    return energy / total + whiteSpill * (0.09f * whiteBloomAmt);
+    return energy / total;
 }
 
 inline float roundedBezelDistance(float2 p) {
@@ -267,14 +255,14 @@ inline float3 yiqToRgb(float3 yiq) {
 
 inline float3 synthesizeScanlines(float3 rowA, float3 rowB, float fracY, float2 signal,
                                   float fieldParity, float loadExcess, float pixelRowsPerSrc,
-                                  float interlacedFlag, float tvLineDeriv, float whiteSwell) {
+                                  float interlacedFlag, float tvLineDeriv) {
     float3 picture = mix(rowA, rowB, fracY);
     if (interlacedFlag > 0.5f) {
         float tvLine = (signal.y * 0.5f + 0.5f) * kNtscVisibleLines - 0.5f;
         float dist = abs(glsl_mod(tvLine - fieldParity + 1.0f, 2.0f) - 1.0f);
         float prevDist = 1.0f - dist;
         float peakLum = max(picture.r, max(picture.g, picture.b));
-        float beamWidth = 0.48f + (0.14f + 0.06f * whiteSwell) * sqrt(peakLum) + 0.05f * loadExcess;
+        float beamWidth = 0.48f + 0.12f * sqrt(peakLum) + 0.03f * loadExcess;
         float d1 = dist / beamWidth;
         float d2 = prevDist / beamWidth;
         float currentLight = exp(-0.5f * d1 * d1);
@@ -284,35 +272,22 @@ inline float3 synthesizeScanlines(float3 rowA, float3 rowB, float fracY, float2 
         return picture * mix(0.86f, fieldLight, smoothstep(1.8f, 4.0f, fieldPixels));
     }
 
-    float maxWide = 0.43f + 0.06f * whiteSwell;
-    float wa = mix(0.24f, maxWide, sqrt(max(rowA.r, max(rowA.g, rowA.b))));
-    float wb = mix(0.24f, maxWide, sqrt(max(rowB.r, max(rowB.g, rowB.b))));
+    float wa = mix(0.24f, 0.42f, sqrt(max(rowA.r, max(rowA.g, rowA.b))));
+    float wb = mix(0.24f, 0.42f, sqrt(max(rowB.r, max(rowB.g, rowB.b))));
     float3 scan = rowA * exp(-0.5f * fracY * fracY / (wa * wa));
     scan += rowB * exp(-0.5f * (1.0f - fracY) * (1.0f - fracY) / (wb * wb));
     return mix(picture * 0.83f, scan, smoothstep(1.35f, 3.1f, pixelRowsPerSrc));
 }
 
-inline float3 applyGlassHalation(texture2d<float> origTex, float3 rgb, float2 p, float loadExcess,
-                                 float2 imgSz, float2 texSz, float consumerBloom, float hvBloom) {
-    float3 haloNear = float3(0.0f);
-    float3 haloWide = float3(0.0f);
+inline float3 applyGlassHalation(texture2d<float> origTex, float3 rgb, float2 p, float loadExcess, float2 imgSz, float2 texSz) {
+    float3 halo = float3(0.0f);
     for (int i = 0; i < 4; ++i) {
-        float2 d = (i < 2) ? float2(2.4f, 0.0f) : float2(0.0f, 1.55f);
+        float2 d = (i < 2) ? float2(2.6f, 0.0f) : float2(0.0f, 1.65f);
         if ((i & 1) == 0) d = -d;
         float3 neighbor = sampleLinearPixel(origTex, floor(p + d + 0.5f), imgSz, texSz, kSrcGamma);
-        haloNear += neighbor * neighbor;
-
-        if (consumerBloom > 0.01f) {
-            float2 dWide = (i < 2) ? float2(3.8f, 1.4f) : float2(-1.6f, 2.7f);
-            if ((i & 1) == 0) dWide = -dWide;
-            float3 farSample = sampleLinearPixel(origTex, floor(p + dWide + 0.5f), imgSz, texSz, kSrcGamma);
-            float farLum = dot(farSample, kLumaWeights);
-            haloWide += farSample * (farLum * farLum);
-        }
+        halo += neighbor * neighbor;
     }
-    float nearGain = mix(0.044f, 0.062f, saturate(consumerBloom)) + 0.042f * loadExcess;
-    float wideGain = (0.045f + 0.032f * loadExcess) * saturate(consumerBloom) * clamp(hvBloom, 0.0f, 2.0f);
-    return rgb * 1.16f + haloNear * nearGain + haloWide * wideGain;
+    return rgb * 1.16f + halo * (0.044f + 0.036f * loadExcess);
 }
 
 inline float3 applyPhosphorMask(float3 rgb, float2 screenPx, float viewWidth, float srcWidth, float maskStrength, float hdrFactor) {
@@ -364,6 +339,76 @@ inline float4 finalizeCrtPixel(float3 linearLight,
 
 // ---------- Pass 1A: RGB Monitor CRT ----------
 
+struct CrtRasterGeometry {
+    bool   outsideBezel;
+    float  aperture;
+    float  lip;
+    float2 face;
+    float2 signal;
+    float  raster;
+    float2 p;
+    float  tvLineDeriv;
+    float  pixelRowsPerSrc;
+    float  reflection;
+};
+
+inline CrtRasterGeometry computeCrtRasterGeometry(float2 texCoord,
+                                                  float2 imgSz,
+                                                  float curvature,
+                                                  float loadExcess,
+                                                  float hvSagExpansion) {
+    CrtRasterGeometry g;
+    g.face = texCoord * 2.0f - 1.0f;
+    float2 warp = float2(0.083f, 0.110f) * curvature;
+    float2 curved = g.face * (float2(1.0f + 0.015f * curvature) + g.face.yx * g.face.yx * warp);
+    float edgeDistance = roundedBezelDistance(curved);
+
+    float hvBloom = 1.0f + hvSagExpansion * loadExcess;
+    g.signal = curved / (float2(0.94f, 0.90f) * hvBloom);
+    float2 signalEdge = abs(g.signal);
+    g.raster = (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.x, signalEdge.x))
+             * (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.y, signalEdge.y));
+
+    g.p = (g.signal * 0.5f + 0.5f) * imgSz - 0.5f;
+    float tvLine = (g.signal.y * 0.5f + 0.5f) * kNtscVisibleLines - 0.5f;
+    g.tvLineDeriv = abs(dfdy(tvLine));
+    g.pixelRowsPerSrc = 1.0f / max(abs(dfdy(g.p.y)), 0.001f);
+
+    g.outsideBezel = (edgeDistance > 0.07f);
+    g.aperture = 1.0f - smoothstep(-0.012f, 0.005f, edgeDistance);
+    g.lip = exp(-abs(edgeDistance - 0.023f) * 75.0f);
+    g.reflection = exp(-4.0f * dot(g.face - float2(-0.42f, 0.53f), g.face - float2(-0.42f, 0.53f)));
+    return g;
+}
+
+inline void applyRfSyncJitter(thread float2 &p,
+                              float frameSeed,
+                              float phase,
+                              float rfSnow,
+                              float rfSignal,
+                              float jAmt,
+                              float flutterScale) {
+    float lineHash = hash11(floor(p.y) + glsl_mod(frameSeed, 1024.0f) * 19.37f);
+    float jitWave = sin(p.y * 0.09f + frameSeed * 1.37f) * 2.2f * jAmt;
+    float jitLine = (lineHash - 0.5f) * 5.2f * jAmt;
+    p.x += (lineHash - 0.5f) * flutterScale * rfSnow
+         + 0.04f * sin(p.y * 1.2f + phase * 5.0f) * rfSignal
+         + jitWave + jitLine;
+    p.y += sin(frameSeed * 2.1f) * 1.5f * jAmt;
+}
+
+inline float sampleStandbyRfSnow(float2 p, float frameSeed, float gammaVal) {
+    float sSeed = glsl_mod(frameSeed, 1024.0f);
+    float rowQ = floor(p.y);
+    float colQ = floor(p.x * 1.15f);
+    float fineWhite = hash13(float3(colQ, rowQ, sSeed * 4.37f + 13.1f)) - 0.5f;
+    float medWhite = sample1DBandNoise(p.x * 0.72f + 11.7f, rowQ, sSeed * 1.91f + 5.3f);
+    float rowJitter = (hash11(rowQ + sSeed * 7.13f) - 0.5f) * 0.14f;
+    float baseSnow = clamp(0.38f + 0.54f * fineWhite + 0.36f * medWhite + rowJitter, 0.02f, 0.94f);
+    float scanAtten = 0.84f + 0.16f * cos(fract(p.y) * 2.0f * kPi);
+    return pow(baseSnow, gammaVal) * scanAtten;
+}
+
 fragment float4 displayRgbFragment(FullscreenOut in [[stage_in]],
                                    texture2d<float> beamTex [[texture(0)]],
                                    texture2d<float> origTex [[texture(1)]],
@@ -376,59 +421,41 @@ fragment float4 displayRgbFragment(FullscreenOut in [[stage_in]],
     float phase = glsl_mod(float(u.frameCount), 4096.0f) / 59.94f;
     float fieldParity = glsl_mod(float(u.frameCount), 2.0f);
 
-    float2 face = in.texCoord * 2.0f - 1.0f;
-    float2 warp = float2(0.083f, 0.110f) * u.curvature;
-    float2 curved = face * (float2(1.0f + 0.015f * u.curvature) + face.yx * face.yx * warp);
-    float edgeDistance = roundedBezelDistance(curved);
+    CrtRasterGeometry geom = computeCrtRasterGeometry(in.texCoord, imgSz, u.curvature, loadExcess, kHvSagExpansion);
     float3 glass = float3(0.010f, 0.014f, 0.017f);
-    if (edgeDistance > 0.07f) {
+    if (geom.outsideBezel) {
         return float4(srgbToLinear(glass * 0.50f), 1.0f);
     }
 
-    float aperture = 1.0f - smoothstep(-0.012f, 0.005f, edgeDistance);
-    float lip = exp(-abs(edgeDistance - 0.023f) * 75.0f);
-
-    float hvBloom = 1.0f + kHvSagExpansion * loadExcess;
-    float2 signal = curved / (float2(0.94f, 0.90f) * hvBloom);
-    float2 signalEdge = abs(signal);
-    float raster = (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.x, signalEdge.x))
-                 * (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.y, signalEdge.y));
-
-    float2 p = (signal * 0.5f + 0.5f) * imgSz - 0.5f;
-    float tvLine = (signal.y * 0.5f + 0.5f) * kNtscVisibleLines - 0.5f;
-    float tvLineDeriv = abs(dfdy(tvLine));
-    float pixelRowsPerSrc = 1.0f / max(abs(dfdy(p.y)), 0.001f);
-
-    float y = floor(p.y);
-    float fracY = fract(p.y);
-    float3 rowA = sampleHorizontalBeam(origTex, p, y, imgSz, texSz, 0.35f * clamp(u.hvBloom, 0.0f, 2.0f));
-    float3 rowB = sampleHorizontalBeam(origTex, p, y + 1.0f, imgSz, texSz, 0.35f * clamp(u.hvBloom, 0.0f, 2.0f));
+    float y = floor(geom.p.y);
+    float fracY = fract(geom.p.y);
+    float3 rowA = sampleHorizontalBeam(origTex, geom.p, y, imgSz, texSz);
+    float3 rowB = sampleHorizontalBeam(origTex, geom.p, y + 1.0f, imgSz, texSz);
     float3 picture = mix(rowA, rowB, fracY);
-    float3 rgb = synthesizeScanlines(rowA, rowB, fracY, signal, fieldParity, loadExcess,
-                                     pixelRowsPerSrc, u.interlaced, tvLineDeriv, 0.25f * saturate(u.hvBloom));
+    float3 rgb = synthesizeScanlines(rowA, rowB, fracY, geom.signal, fieldParity, loadExcess,
+                                     geom.pixelRowsPerSrc, u.interlaced, geom.tvLineDeriv);
 
-    float2 q = floor(p + 0.5f);
+    float2 q = floor(geom.p + 0.5f);
     float3 previous = sampleLinearPixel(prevTex, q, imgSz, texSz, kSrcGamma);
     rgb += max(previous - picture, 0.0f) * kP22Decay;
-    rgb = applyGlassHalation(origTex, rgb, p, loadExcess, imgSz, texSz, 0.15f, u.hvBloom);
+    rgb = applyGlassHalation(origTex, rgb, geom.p, loadExcess, imgSz, texSz);
 
     float viewWidth = (u.outputSize.x > 1.0f) ? u.outputSize.x : (1.0f / max(abs(dfdx(in.texCoord.x)), 0.0001f));
     float hdrFactor = max(clamp(u.hdrHeadroom, 1.0f, 3.5f) - 1.0f, 0.0f) * clamp(u.hdrBoost, 0.0f, 1.5f);
     rgb = applyPhosphorMask(rgb, in.position.xy, viewWidth, imgSz.x, u.maskStrength, hdrFactor);
 
-    float vignette = 1.0f - 0.24f * smoothstep(0.25f, 1.85f, dot(face, face));
-    float hum = 1.0f + 0.003f * sin(p.y * 0.08f + phase * 2.0f);
+    float vignette = 1.0f - 0.24f * smoothstep(0.25f, 1.85f, dot(geom.face, geom.face));
+    float hum = 1.0f + 0.003f * sin(geom.p.y * 0.08f + phase * 2.0f);
     float noise = fract(sin(dot(fmod(in.position.xy, 317.0f), float2(12.9898f, 78.233f)) + phase * 17.0f) * 43758.5453f) - 0.5f;
-    float reflection = exp(-4.0f * dot(face - float2(-0.42f, 0.53f), face - float2(-0.42f, 0.53f)));
 
-    return finalizeCrtPixel(rgb * vignette * hum, beamLoad, aperture, raster, glass, reflection, lip,
-                            noise * 0.008f, u.hdrHeadroom, u.hdrBoost);
+    return finalizeCrtPixel(rgb * vignette * hum, beamLoad, geom.aperture, geom.raster, glass,
+                            geom.reflection, geom.lip, noise * 0.008f, u.hdrHeadroom, u.hdrBoost);
 }
 
 // ---------- Pass 1B: Color VHF RF Television ----------
 
 inline float3 sampleRfScanline(texture2d<float> origTex, float2 p, float row, float rfSnow, float rfSig,
-                               float frameSeed, float2 imgSz, float2 texSz, float whiteBloomAmt) {
+                               float frameSeed, float2 imgSz, float2 texSz) {
     float subcarrierLinePhase = row * kPi + glsl_mod(frameSeed, 2.0f) * 0.45f;
     float wash = clamp(rfSig * 0.5f, 0.0f, 0.85f);
     float baseLift = 0.026f * clamp(rfSnow, 0.0f, 1.5f);
@@ -483,25 +510,7 @@ inline float3 sampleRfScanline(texture2d<float> origTex, float2 p, float row, fl
     float3 convShift = kGunConvergence * 0.5f;
     float3 linL = sampleLinearPixel(origTex, float2(floor(p.x - 1.0f + 0.5f), row), imgSz, texSz, kSrcGamma);
     float3 linR = sampleLinearPixel(origTex, float2(floor(p.x + 1.0f + 0.5f), row), imgSz, texSz, kSrcGamma);
-    float3 baseRf = mix(lin, float3(linR.r, lin.g, linL.b) * 0.14f + lin * 0.86f, abs(convShift.b));
-
-    if (whiteBloomAmt <= 0.001f) {
-        return baseRf;
-    }
-
-    // Consumer CRT horizontal white cathode bloom: bright pixels spill horizontally into adjacent dark pixels.
-    float center = floor(p.x + 0.5f);
-    float3 whiteSpill = float3(0.0f);
-    for (int i = -2; i <= 2; ++i) {
-        float x = center + float(i);
-        float3 nLin = sampleLinearPixel(origTex, float2(x, row), imgSz, texSz, kSrcGamma);
-        float lum = dot(nLin, kLumaWeights);
-        float whiteDrive = smoothstep(0.42f, 1.0f, lum);
-        float dx = p.x - x;
-        float w = exp(-(dx * dx) / (2.0f * 1.25f * 1.25f));
-        whiteSpill += nLin * (whiteDrive * w);
-    }
-    return baseRf + whiteSpill * (0.095f * whiteBloomAmt);
+    return mix(lin, float3(linR.r, lin.g, linL.b) * 0.14f + lin * 0.86f, abs(convShift.b));
 }
 
 fragment float4 displayRfFragment(FullscreenOut in [[stage_in]],
@@ -517,84 +526,51 @@ fragment float4 displayRfFragment(FullscreenOut in [[stage_in]],
     float phase = frameSeed / 59.94f;
     float fieldParity = glsl_mod(float(u.frameCount), 2.0f);
 
-    float2 face = in.texCoord * 2.0f - 1.0f;
-    float2 warp = float2(0.083f, 0.110f) * u.curvature;
-    float2 curved = face * (float2(1.0f + 0.015f * u.curvature) + face.yx * face.yx * warp);
-    float edgeDistance = roundedBezelDistance(curved);
+    CrtRasterGeometry geom = computeCrtRasterGeometry(in.texCoord, imgSz, u.curvature, loadExcess, kHvSagExpansion);
     float3 glass = float3(0.010f, 0.014f, 0.017f);
-    if (edgeDistance > 0.07f) {
+    if (geom.outsideBezel) {
         return float4(srgbToLinear(glass * 0.50f), 1.0f);
     }
 
-    float aperture = 1.0f - smoothstep(-0.012f, 0.005f, edgeDistance);
-    float lip = exp(-abs(edgeDistance - 0.023f) * 75.0f);
-
-    float hvBloom = 1.0f + kRfHvSagExpansion * loadExcess;
-    float2 signal = curved / (float2(0.94f, 0.90f) * hvBloom);
-    float2 signalEdge = abs(signal);
-    float raster = (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.x, signalEdge.x))
-                 * (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.y, signalEdge.y));
-
-    float2 p = (signal * 0.5f + 0.5f) * imgSz - 0.5f;
-    float tvLine = (signal.y * 0.5f + 0.5f) * kNtscVisibleLines - 0.5f;
-    float tvLineDeriv = abs(dfdy(tvLine));
-    float pixelRowsPerSrc = 1.0f / max(abs(dfdy(p.y)), 0.001f);
-
-    float lineHash = hash11(floor(p.y) + glsl_mod(frameSeed, 1024.0f) * 19.37f);
     float jAmt = clamp(u.powerJitter, 0.0f, 1.0f);
-    float jitWave = sin(p.y * 0.09f + frameSeed * 1.37f) * 2.2f * jAmt;
-    float jitLine = (lineHash - 0.5f) * 5.2f * jAmt;
-    p.x += (lineHash - 0.5f) * 0.20f * u.rfSnow
-         + 0.04f * sin(p.y * 1.2f + phase * 5.0f) * u.rfSignal
-         + jitWave + jitLine;
-    p.y += sin(frameSeed * 2.1f) * 1.5f * jAmt;
+    applyRfSyncJitter(geom.p, frameSeed, phase, u.rfSnow, u.rfSignal, jAmt, 0.20f);
 
     float3 rgb;
     if (u.rfStandbySnow > 0.5f) {
-        float sSeed = glsl_mod(frameSeed, 1024.0f);
-        float rowQ = floor(p.y);
-        float colQ = floor(p.x * 1.15f);
-        float fineWhite = hash13(float3(colQ, rowQ, sSeed * 4.37f + 13.1f)) - 0.5f;
-        float medWhite = sample1DBandNoise(p.x * 0.72f + 11.7f, rowQ, sSeed * 1.91f + 5.3f);
-        float rowJitter = (hash11(rowQ + sSeed * 7.13f) - 0.5f) * 0.14f;
-        float baseSnow = clamp(0.38f + 0.54f * fineWhite + 0.36f * medWhite + rowJitter, 0.02f, 0.94f);
-        float3 scanAtten = float3(0.84f + 0.16f * cos(fract(p.y) * 2.0f * kPi));
-        rgb = pow(float3(baseSnow), float3(kSrcGamma)) * scanAtten;
+        rgb = float3(sampleStandbyRfSnow(geom.p, frameSeed, kSrcGamma));
         beamLoad = 0.08f; // Keep standby static sparkle crisp in HDR
     } else {
         float effSnow = u.rfSnow + 1.45f * jAmt;
         float effSig = u.rfSignal + 0.65f * jAmt;
-        float y = floor(p.y);
-        float fracY = fract(p.y);
-        float bloomAmt = clamp(u.hvBloom, 0.0f, 1.6f);
-        float3 rowA = sampleRfScanline(origTex, p, y, effSnow, effSig, frameSeed, imgSz, texSz, bloomAmt);
-        float3 rowB = sampleRfScanline(origTex, p, y + 1.0f, effSnow, effSig, frameSeed, imgSz, texSz, bloomAmt);
+        float y = floor(geom.p.y);
+        float fracY = fract(geom.p.y);
+        float3 rowA = sampleRfScanline(origTex, geom.p, y, effSnow, effSig, frameSeed, imgSz, texSz);
+        float3 rowB = sampleRfScanline(origTex, geom.p, y + 1.0f, effSnow, effSig, frameSeed, imgSz, texSz);
         float3 picture = mix(rowA, rowB, fracY);
-        rgb = synthesizeScanlines(rowA, rowB, fracY, signal, fieldParity, loadExcess,
-                                  pixelRowsPerSrc, u.interlaced, tvLineDeriv, saturate(u.hvBloom));
+        rgb = synthesizeScanlines(rowA, rowB, fracY, geom.signal, fieldParity, loadExcess,
+                                  geom.pixelRowsPerSrc, u.interlaced, geom.tvLineDeriv);
 
-        float2 q = floor(p + 0.5f);
+        float2 q = floor(geom.p + 0.5f);
         float3 previous = sampleLinearPixel(prevTex, q, imgSz, texSz, kSrcGamma);
         rgb += max(previous - picture, 0.0f) * kP22Decay;
-        rgb = applyGlassHalation(origTex, rgb, p, loadExcess, imgSz, texSz, 1.0f, u.hvBloom);
+        rgb = applyGlassHalation(origTex, rgb, geom.p, loadExcess, imgSz, texSz);
     }
 
     float viewWidth = (u.outputSize.x > 1.0f) ? u.outputSize.x : (1.0f / max(abs(dfdx(in.texCoord.x)), 0.0001f));
     float hdrFactor = max(clamp(u.hdrHeadroom, 1.0f, 3.5f) - 1.0f, 0.0f) * clamp(u.hdrBoost, 0.0f, 1.5f);
     rgb = applyPhosphorMask(rgb, in.position.xy, viewWidth, imgSz.x, u.maskStrength, hdrFactor);
 
-    float vignette = 1.0f - 0.24f * smoothstep(0.25f, 1.85f, dot(face, face));
-    float agcWave = 1.0f + 0.014f * u.rfSignal * sin(p.y * 0.05f + phase * 3.1f);
-    float reflection = exp(-4.0f * dot(face - float2(-0.42f, 0.53f), face - float2(-0.42f, 0.53f)));
+    float vignette = 1.0f - 0.24f * smoothstep(0.25f, 1.85f, dot(geom.face, geom.face));
+    float agcWave = 1.0f + 0.014f * u.rfSignal * sin(geom.p.y * 0.05f + phase * 3.1f);
 
-    return finalizeCrtPixel(rgb * vignette * agcWave, beamLoad, aperture, raster, glass, reflection, lip,
-                            0.0f, u.hdrHeadroom, u.hdrBoost);
+    return finalizeCrtPixel(rgb * vignette * agcWave, beamLoad, geom.aperture, geom.raster, glass,
+                            geom.reflection, geom.lip, 0.0f, u.hdrHeadroom, u.hdrBoost);
 }
 
 // ---------- Pass 1C: Monochrome P4 Phosphor VHF RF Television ----------
 
 inline float sampleBwRfScanline(texture2d<float> origTex, float2 p, float row, float rfSnow, float rfSig,
-                                  float frameSeed, float2 imgSz, float2 texSz, float whiteBloomAmt) {
+                                  float frameSeed, float2 imgSz, float2 texSz) {
     float subcarrierLinePhase = row * kSubcarrierRadPerTexel + glsl_mod(frameSeed, 3.0f) * 0.7f;
     float wash = clamp(rfSig * 0.42f, 0.0f, 0.75f);
     float baseLift = 0.020f * clamp(rfSnow, 0.0f, 1.5f);
@@ -632,22 +608,7 @@ inline float sampleBwRfScanline(texture2d<float> origTex, float2 p, float row, f
     }
 
     float bwVid = clamp(bwAcc * 0.98f + 0.006f, 1e-6f, 1.06f);
-    float baseLum = pow(bwVid, kBwSrcGamma);
-    if (whiteBloomAmt <= 0.001f) {
-        return baseLum;
-    }
-
-    float center = floor(p.x + 0.5f);
-    float whiteSpill = 0.0f;
-    for (int i = -2; i <= 2; ++i) {
-        float x = center + float(i);
-        float nLum = sampleLinearLuma(origTex, float2(x, row), imgSz, texSz);
-        float whiteDrive = smoothstep(0.40f, 1.0f, nLum);
-        float dx = p.x - x;
-        float w = exp(-(dx * dx) / (2.0f * 1.30f * 1.30f));
-        whiteSpill += nLum * (whiteDrive * w);
-    }
-    return baseLum + whiteSpill * (0.11f * whiteBloomAmt);
+    return pow(bwVid, kBwSrcGamma);
 }
 
 inline float synthesizeBwScanlines(float rowA, float rowB, float fracY, float2 signal,
@@ -658,7 +619,7 @@ inline float synthesizeBwScanlines(float rowA, float rowB, float fracY, float2 s
         float tvLine = (signal.y * 0.5f + 0.5f) * kNtscVisibleLines - 0.5f;
         float dist = abs(glsl_mod(tvLine - fieldParity + 1.0f, 2.0f) - 1.0f);
         float prevDist = 1.0f - dist;
-        float beamWidth = 0.54f + 0.28f * sqrt(max(picture, 0.0f)) + 0.06f * loadExcess;
+        float beamWidth = 0.54f + 0.22f * sqrt(max(picture, 0.0f)) + 0.04f * loadExcess;
         float d1 = dist / beamWidth;
         float d2 = prevDist / beamWidth;
         float currentLight = exp(-0.5f * d1 * d1);
@@ -668,8 +629,8 @@ inline float synthesizeBwScanlines(float rowA, float rowB, float fracY, float2 s
         return picture * mix(0.91f, fieldLight, smoothstep(1.8f, 4.0f, fieldPixels));
     }
 
-    float wa = mix(0.32f, 0.62f, sqrt(max(rowA, 0.0f)));
-    float wb = mix(0.32f, 0.62f, sqrt(max(rowB, 0.0f)));
+    float wa = mix(0.32f, 0.55f, sqrt(max(rowA, 0.0f)));
+    float wb = mix(0.32f, 0.55f, sqrt(max(rowB, 0.0f)));
     float scan = rowA * exp(-0.5f * fracY * fracY / (wa * wa));
     scan += rowB * exp(-0.5f * (1.0f - fracY) * (1.0f - fracY) / (wb * wb));
     return mix(picture * 0.89f, scan, smoothstep(1.35f, 3.1f, pixelRowsPerSrc));
@@ -678,16 +639,16 @@ inline float synthesizeBwScanlines(float rowA, float rowB, float fracY, float2 s
 inline float applyBwHalation(texture2d<float> origTex, float lum, float2 p, float loadExcess, float2 imgSz, float2 texSz) {
     float haloInner = 0.0f, haloOuter = 0.0f;
     for (int i = 0; i < 4; ++i) {
-        float2 d1 = (i < 2) ? float2(1.9f, 0.0f) : float2(0.0f, 1.30f);
-        float2 d2 = (i < 2) ? float2(4.0f, 0.0f) : float2(0.0f, 2.65f);
+        float2 d1 = (i < 2) ? float2(1.8f, 0.0f) : float2(0.0f, 1.25f);
+        float2 d2 = (i < 2) ? float2(3.8f, 0.0f) : float2(0.0f, 2.50f);
         if ((i & 1) == 0) { d1 = -d1; d2 = -d2; }
         float n1 = sampleLinearLuma(origTex, floor(p + d1 + 0.5f), imgSz, texSz);
         float n2 = sampleLinearLuma(origTex, floor(p + d2 + 0.5f), imgSz, texSz);
         haloInner += n1 * n1;
         haloOuter += n2 * n2;
     }
-    float halo = haloInner * 0.60f + haloOuter * 0.40f;
-    return lum * 1.10f + halo * (0.088f + 0.072f * loadExcess);
+    float halo = haloInner * 0.65f + haloOuter * 0.35f;
+    return lum * 1.10f + halo * (0.072f + 0.055f * loadExcess);
 }
 
 fragment float4 displayBwFragment(FullscreenOut in [[stage_in]],
@@ -703,78 +664,45 @@ fragment float4 displayBwFragment(FullscreenOut in [[stage_in]],
     float phase = frameSeed / 59.94f;
     float fieldParity = glsl_mod(float(u.frameCount), 2.0f);
 
-    float2 face = in.texCoord * 2.0f - 1.0f;
-    float2 warp = float2(0.083f, 0.110f) * u.curvature;
-    float2 curved = face * (float2(1.0f + 0.015f * u.curvature) + face.yx * face.yx * warp);
-    float edgeDistance = roundedBezelDistance(curved);
+    CrtRasterGeometry geom = computeCrtRasterGeometry(in.texCoord, imgSz, u.curvature, loadExcess, kBwHvSagExpansion);
     float3 glass = float3(0.016f, 0.016f, 0.017f);
-    if (edgeDistance > 0.07f) {
+    if (geom.outsideBezel) {
         return float4(srgbToLinear(glass * 0.50f), 1.0f);
     }
 
-    float aperture = 1.0f - smoothstep(-0.012f, 0.005f, edgeDistance);
-    float lip = exp(-abs(edgeDistance - 0.023f) * 75.0f);
-
-    float hvBloom = 1.0f + kBwHvSagExpansion * loadExcess;
-    float2 signal = curved / (float2(0.94f, 0.90f) * hvBloom);
-    float2 signalEdge = abs(signal);
-    float raster = (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.x, signalEdge.x))
-                 * (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.y, signalEdge.y));
-
-    float2 p = (signal * 0.5f + 0.5f) * imgSz - 0.5f;
-    float tvLine = (signal.y * 0.5f + 0.5f) * kNtscVisibleLines - 0.5f;
-    float tvLineDeriv = abs(dfdy(tvLine));
-    float pixelRowsPerSrc = 1.0f / max(abs(dfdy(p.y)), 0.001f);
-
-    float lineHash = hash11(floor(p.y) + glsl_mod(frameSeed, 1024.0f) * 19.37f);
     float jAmt = clamp(u.powerJitter, 0.0f, 1.0f);
-    float jitWave = sin(p.y * 0.09f + frameSeed * 1.37f) * 2.2f * jAmt;
-    float jitLine = (lineHash - 0.5f) * 5.2f * jAmt;
-    p.x += (lineHash - 0.5f) * 0.16f * u.rfSnow
-         + 0.04f * sin(p.y * 1.2f + phase * 5.0f) * u.rfSignal
-         + jitWave + jitLine;
-    p.y += sin(frameSeed * 2.1f) * 1.5f * jAmt;
+    applyRfSyncJitter(geom.p, frameSeed, phase, u.rfSnow, u.rfSignal, jAmt, 0.16f);
 
     float lum;
     if (u.rfStandbySnow > 0.5f) {
-        float sSeed = glsl_mod(frameSeed, 1024.0f);
-        float rowQ = floor(p.y);
-        float colQ = floor(p.x * 1.15f);
-        float fineWhite = hash13(float3(colQ, rowQ, sSeed * 4.37f + 13.1f)) - 0.5f;
-        float medWhite = sample1DBandNoise(p.x * 0.72f + 11.7f, rowQ, sSeed * 1.91f + 5.3f);
-        float rowJitter = (hash11(rowQ + sSeed * 7.13f) - 0.5f) * 0.14f;
-        float baseSnow = clamp(0.38f + 0.54f * fineWhite + 0.36f * medWhite + rowJitter, 0.02f, 0.94f);
-        float scanAtten = 0.84f + 0.16f * cos(fract(p.y) * 2.0f * kPi);
-        lum = pow(baseSnow, kBwSrcGamma) * scanAtten;
+        lum = sampleStandbyRfSnow(geom.p, frameSeed, kBwSrcGamma);
         beamLoad = 0.08f;
     } else {
         float effSnow = u.rfSnow + 1.45f * jAmt;
         float effSig = u.rfSignal + 0.65f * jAmt;
-        float y = floor(p.y);
-        float fracY = fract(p.y);
-        float bloomAmt = clamp(u.hvBloom, 0.0f, 1.6f);
-        float rowA = sampleBwRfScanline(origTex, p, y, effSnow, effSig, frameSeed, imgSz, texSz, bloomAmt);
-        float rowB = sampleBwRfScanline(origTex, p, y + 1.0f, effSnow, effSig, frameSeed, imgSz, texSz, bloomAmt);
+        float y = floor(geom.p.y);
+        float fracY = fract(geom.p.y);
+        float rowA = sampleBwRfScanline(origTex, geom.p, y, effSnow, effSig, frameSeed, imgSz, texSz);
+        float rowB = sampleBwRfScanline(origTex, geom.p, y + 1.0f, effSnow, effSig, frameSeed, imgSz, texSz);
         float picture = mix(rowA, rowB, fracY);
-        lum = synthesizeBwScanlines(rowA, rowB, fracY, signal, fieldParity, loadExcess,
-                                    pixelRowsPerSrc, u.interlaced, tvLineDeriv);
+        lum = synthesizeBwScanlines(rowA, rowB, fracY, geom.signal, fieldParity, loadExcess,
+                                    geom.pixelRowsPerSrc, u.interlaced, geom.tvLineDeriv);
 
-        float2 q = floor(p + 0.5f);
+        float2 q = floor(geom.p + 0.5f);
         float prevY = sampleLinearLuma(prevTex, q, imgSz, texSz);
         lum += max(prevY - picture, 0.0f) * 0.175f;
-        lum = applyBwHalation(origTex, lum, p, loadExcess, imgSz, texSz);
+        lum = applyBwHalation(origTex, lum, geom.p, loadExcess, imgSz, texSz);
     }
 
-    float vignette = 1.0f - 0.22f * smoothstep(0.25f, 1.85f, dot(face, face));
-    float agcWave = 1.0f + 0.014f * u.rfSignal * sin(p.y * 0.05f + phase * 3.1f);
+    float vignette = 1.0f - 0.22f * smoothstep(0.25f, 1.85f, dot(geom.face, geom.face));
+    float agcWave = 1.0f + 0.014f * u.rfSignal * sin(geom.p.y * 0.05f + phase * 3.1f);
     float rawL = max(lum * vignette * agcWave, 1e-6f);
     // In SDR keep the soft P4 rolloff <= 1.25; in HDR allow P4 silver-white cathode glow to reach further cleanly.
     float hdrFactor = max(clamp(u.hdrHeadroom, 1.0f, 3.5f) - 1.0f, 0.0f) * clamp(u.hdrBoost, 0.0f, 1.5f);
     float maxMono = mix(1.25f, 2.20f, saturate(hdrFactor * 0.6f));
     float monoL = clamp(rawL / (1.0f + 0.14f * rawL), 1e-6f, maxMono);
     float3 p4Tint = mix(float3(0.98f, 0.98f, 0.97f), float3(0.98f, 0.99f, 1.00f), smoothstep(0.10f, 0.85f, monoL));
-    float reflection = exp(-4.0f * dot(face - float2(-0.42f, 0.53f), face - float2(-0.42f, 0.53f)));
 
-    return finalizeCrtPixel(float3(monoL) * pow(p4Tint, float3(2.2f)), beamLoad, aperture, raster, glass,
-                            reflection, lip, 0.0f, u.hdrHeadroom, u.hdrBoost);
+    return finalizeCrtPixel(float3(monoL) * pow(p4Tint, float3(2.2f)), beamLoad, geom.aperture, geom.raster,
+                            glass, geom.reflection, geom.lip, 0.0f, u.hdrHeadroom, u.hdrBoost);
 }

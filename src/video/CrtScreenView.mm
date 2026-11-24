@@ -184,11 +184,15 @@ NSString *firstDroppedRomPath(NSPasteboard *pasteboard) {
     }
 }
 
-- (void)triggerFreezeGlitch {
+- (void)triggerTransientPeak:(float)peak decay:(float)decay {
     _transientTime = CFAbsoluteTimeGetCurrent();
-    _transientPeak = 0.55f;
-    _transientDecay = 28.0f;
+    _transientPeak = peak;
+    _transientDecay = decay;
     [self requestRedraw];
+}
+
+- (void)triggerFreezeGlitch {
+    [self triggerTransientPeak:0.55f decay:28.0f];
 }
 
 - (void)pushRingFramePixels:(const uint32_t *)pixels width:(unsigned)width height:(unsigned)height {
@@ -244,17 +248,11 @@ NSString *firstDroppedRomPath(NSPasteboard *pasteboard) {
 }
 
 - (void)triggerResetGlitch {
-    _transientTime = CFAbsoluteTimeGetCurrent();
-    _transientPeak = 0.92f;
-    _transientDecay = 18.0f;
-    [self requestRedraw];
+    [self triggerTransientPeak:0.92f decay:18.0f];
 }
 
 - (void)triggerCartridgeBump {
-    _transientTime = CFAbsoluteTimeGetCurrent();
-    _transientPeak = 0.42f;
-    _transientDecay = 32.0f;
-    [self requestRedraw];
+    [self triggerTransientPeak:0.42f decay:32.0f];
 }
 
 - (void)showConnectorHud {
