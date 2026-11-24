@@ -172,9 +172,9 @@ Any controller supported by Apple `GameController` (Xbox, PlayStation, Switch Pr
 - **Menu** → START, **Options / L1** → SELECT
 - **L2** → Quick Save, **Select + R2** → Quick Load (can be disabled in Controller Settings)
 
-### Language Switching (`日本語` / `English`)
+### Language Switching (Japanese / English)
 
-The UI automatically matches your macOS system language on launch, and can be switched live at any time from the application menu (**Language → Follow System / 日本語 / English**).
+The UI automatically matches your macOS system language on launch, and can be switched live at any time from the application menu (**Language → Follow System / Japanese / English**; in Japanese mode: **言語 → システムに合わせる / 日本語 / 英語**).
 
 ---
 

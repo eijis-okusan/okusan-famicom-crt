@@ -21,7 +21,7 @@
     const int diskNo = 1 + (side / 2);
     const char sideCh = (side & 1) ? 'B' : 'A';
     return app_l10n::tr(
-        [NSString stringWithFormat:@"Disk %d %c面", diskNo, sideCh],
+        [NSString stringWithFormat:@"ディスク %d %c面", diskNo, sideCh],
         [NSString stringWithFormat:@"Disk %d Side %c", diskNo, sideCh]);
 }
 

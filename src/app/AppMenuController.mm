@@ -69,7 +69,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
 
     [appMenu addItem:[NSMenuItem separatorItem]];
 
-    NSMenuItem *langRootItem = [[NSMenuItem alloc] initWithTitle:app_l10n::tr(@"言語 / Language", @"Language")
+    NSMenuItem *langRootItem = [[NSMenuItem alloc] initWithTitle:app_l10n::tr(@"言語", @"Language")
                                                           action:nil
                                                    keyEquivalent:@""];
     NSMenu *langMenu = [[NSMenu alloc] initWithTitle:langRootItem.title];
@@ -78,12 +78,12 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
                                    keyEquivalent:@""];
     _menuLangSystem.target = target;
 
-    _menuLangJapanese = [langMenu addItemWithTitle:@"日本語"
+    _menuLangJapanese = [langMenu addItemWithTitle:app_l10n::tr(@"日本語", @"Japanese")
                                             action:@selector(selectLanguageJapanese:)
                                      keyEquivalent:@""];
     _menuLangJapanese.target = target;
 
-    _menuLangEnglish = [langMenu addItemWithTitle:@"English"
+    _menuLangEnglish = [langMenu addItemWithTitle:app_l10n::tr(@"英語", @"English")
                                            action:@selector(selectLanguageEnglish:)
                                     keyEquivalent:@""];
     _menuLangEnglish.target = target;
@@ -116,7 +116,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
         return item;
     };
 
-    add(app_l10n::tr(@"ROM / .fds を開く...", @"Open ROM / FDS..."), @selector(openRomDialog:), @"o");
+    add(app_l10n::tr(@"ロム / ディスクを開く...", @"Open ROM / FDS..."), @selector(openRomDialog:), @"o");
     [emuMenu addItem:[NSMenuItem separatorItem]];
     _menuPause = add(app_l10n::tr(@"一時停止", @"Pause"), @selector(togglePause:), @"p");
     _menuFreeze = add(app_l10n::tr(@"接触フリーズ (F)", @"Freeze Famicom (F)"), @selector(toggleFreeze:), @"");
@@ -138,7 +138,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
 
 - (NSMenuItem *)buildDisplayMenuWithTarget:(id)target {
     NSMenuItem *displayItem = [[NSMenuItem alloc] init];
-    NSMenu *displayMenu = [[NSMenu alloc] initWithTitle:app_l10n::tr(@"CRT ディスプレイ", @"CRT Display")];
+    NSMenu *displayMenu = [[NSMenu alloc] initWithTitle:app_l10n::tr(@"ディスプレイ", @"CRT Display")];
     displayMenu.autoenablesItems = NO;
 
     auto add = [&](NSString *title, SEL sel, NSString *key) {
@@ -148,40 +148,40 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     };
 
     _menuPower = add(app_l10n::tr(@"ファミコン電源 (O)", @"Famicom Power (O)"), @selector(toggleConsolePower:), @"");
-    add(app_l10n::tr(@"接触不良起動 / スイッチOFF (@)", @"Contact Fault Boot / Power Off (@)"),
+    add(app_l10n::tr(@"接触不良起動 / スイッチオフ (@)", @"Contact Fault Boot / Power Off (@)"),
         @selector(toggleBadBootSwitch:), @"");
     [displayMenu addItem:[NSMenuItem separatorItem]];
 
-    _menuRgb  = add(app_l10n::tr(@"RGB モニター (okusan-crt-rgb)", @"RGB Monitor (okusan-crt-rgb)"), @selector(selectRgbMode:), @"1");
-    _menuRf   = add(app_l10n::tr(@"カラー RF テレビ (okusan-crt-rf)", @"Color RF Television (okusan-crt-rf)"), @selector(selectColorRfMode:), @"2");
+    _menuRgb  = add(app_l10n::tr(@"RGB モニター接続", @"RGB Monitor"), @selector(selectRgbMode:), @"1");
+    _menuRf   = add(app_l10n::tr(@"カラー RF テレビ接続", @"Color RF Television"), @selector(selectColorRfMode:), @"2");
     _menuBwRf = add(app_l10n::tr(@"白黒 RF テレビ (P4蛍光体)", @"B&W RF Television (P4 Phosphor)"), @selector(selectBwRfMode:), @"3");
     [displayMenu addItem:[NSMenuItem separatorItem]];
 
-    _menuInterlaced = add(app_l10n::tr(@"525本 480i インターレース (OFF = 240p)",
+    _menuInterlaced = add(app_l10n::tr(@"525本 480i インターレース (オフで 240p)",
                                          @"525-Line 480i Interlace (Off = 240p)"),
                           @selector(toggleInterlaced:), @"i");
-    _menuHdr       = add(app_l10n::tr(@"HDR CRT ピーク強調 (EDR)", @"HDR CRT Luminance (EDR)"),
+    _menuHdr       = add(app_l10n::tr(@"HDR ブラウン管ピーク強調", @"HDR CRT Luminance (EDR)"),
                          @selector(toggleHdr:), @"d");
-    _menuHvBloom   = add(app_l10n::tr(@"フライバック HV ブルーム", @"Flyback HV Bloom"), @selector(toggleHvBloom:), @"b");
-    _menuCurvature = add(app_l10n::tr(@"ブラウン管曲率 (OFF = 平面)", @"Tube Curvature (Off = Flat)"), @selector(toggleCurvature:), @"c");
+    _menuHvBloom   = add(app_l10n::tr(@"フライバック高圧ブルーム", @"Flyback HV Bloom"), @selector(toggleHvBloom:), @"b");
+    _menuCurvature = add(app_l10n::tr(@"ブラウン管の湾曲 (オフで平面)", @"Tube Curvature (Off = Flat)"), @selector(toggleCurvature:), @"c");
     _menuSlotMask  = add(app_l10n::tr(@"蛍光体スロットマスク", @"Phosphor Slot Mask"), @selector(toggleSlotMask:), @"k");
     [displayMenu addItem:[NSMenuItem separatorItem]];
 
-    add(app_l10n::tr(@"RF ノイズ: 弱 (0.5x)", @"RF Static: Mild (0.5x)"), @selector(selectRfMild:), @"");
-    add(app_l10n::tr(@"RF ノイズ: 標準 (1.0x)", @"RF Static: Standard (1.0x)"), @selector(selectRfStandard:), @"");
-    add(app_l10n::tr(@"RF ノイズ: 強 (1.6x)", @"RF Static: Heavy (1.6x)"), @selector(selectRfHeavy:), @"");
+    add(app_l10n::tr(@"RF ノイズ: 弱 (0.5倍)", @"RF Static: Mild (0.5x)"), @selector(selectRfMild:), @"");
+    add(app_l10n::tr(@"RF ノイズ: 標準 (1.0倍)", @"RF Static: Standard (1.0x)"), @selector(selectRfStandard:), @"");
+    add(app_l10n::tr(@"RF ノイズ: 強 (1.6倍)", @"RF Static: Heavy (1.6x)"), @selector(selectRfHeavy:), @"");
     [displayMenu addItem:[NSMenuItem separatorItem]];
 
-    _menu3dItem = [[NSMenuItem alloc] initWithTitle:app_l10n::tr(@"ファミコン3Dシステム (G)", @"Famicom 3D System (G)")
+    _menu3dItem = [[NSMenuItem alloc] initWithTitle:app_l10n::tr(@"ファミコン 3Dシステム (G)", @"Famicom 3D System (G)")
                                              action:nil
                                       keyEquivalent:@""];
     NSMenu *menu3d = [[NSMenu alloc] initWithTitle:_menu3dItem.title];
     menu3d.autoenablesItems = NO;
     NSString *mode3dTitles[4] = {
-        app_l10n::tr(@"裸眼 (生CRT 60Hz交互表示)", @"Raw 60Hz CRT (Unshuttered)"),
-        app_l10n::tr(@"3Dスコープ実機 (HVC-031 液晶+残像)", @"3D Scope (HVC-031 Shutter + Glow)"),
-        app_l10n::tr(@"並行視 (SBS 最大65mm IPD制限)", @"Parallel SBS (65mm IPD Cap)"),
-        app_l10n::tr(@"交差視 (SBS L/R反転)", @"Cross-Eyed SBS (R | L)")
+        app_l10n::tr(@"裸眼 (60Hz 交互表示)", @"Raw 60Hz CRT (Unshuttered)"),
+        app_l10n::tr(@"3Dスコープ実機 (液晶シャッター＋残像)", @"3D Scope (HVC-031 Shutter + Glow)"),
+        app_l10n::tr(@"並行視 (左右分割・瞳孔間制限)", @"Parallel SBS (65mm IPD Cap)"),
+        app_l10n::tr(@"交差視 (左右分割・左右反転)", @"Cross-Eyed SBS (R | L)")
     };
     for (int i = 0; i < 4; ++i) {
         NSMenuItem *item = [menu3d addItemWithTitle:mode3dTitles[i]
@@ -192,7 +192,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
         _mode3dItems[i] = item;
     }
     [menu3d addItem:[NSMenuItem separatorItem]];
-    _invert3dEyesItem = [menu3d addItemWithTitle:app_l10n::tr(@"左右 (L/R) 映像を入れ替える", @"Swap Left / Right Eyes")
+    _invert3dEyesItem = [menu3d addItemWithTitle:app_l10n::tr(@"左右の映像を入れ替える", @"Swap Left / Right Eyes")
                                           action:@selector(toggleInvert3dEyes:)
                                    keyEquivalent:@""];
     _invert3dEyesItem.target = target;
@@ -219,7 +219,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
         return item;
     };
 
-    add(app_l10n::tr(@"ディスク (.fds) を差替え...", @"Hot-Swap Disk (.fds)..."), @selector(openFdsHotSwapDialog:));
+    add(app_l10n::tr(@"ディスクを入れ替える...", @"Hot-Swap Disk (.fds)..."), @selector(openFdsHotSwapDialog:));
     [_diskMenu addItem:[NSMenuItem separatorItem]];
     _diskFlipItem = add(app_l10n::tr(@"ディスクを裏返す (C)", @"Flip Disk Side (C)"), @selector(flipFdsDisk:));
     _diskEjectItem = add(app_l10n::tr(@"ディスクを抜く (E)", @"Eject Disk (E)"), @selector(ejectFdsDisk:));
@@ -236,7 +236,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
             const char sideCh = (s & 1) ? 'B' : 'A';
             NSString *keyHint = (s < 4) ? [NSString stringWithFormat:@" (%d)", s + 1] : @"";
             title = app_l10n::tr(
-                [NSString stringWithFormat:@"Disk %d %c面を入れる%@", diskNo, sideCh, keyHint],
+                [NSString stringWithFormat:@"ディスク %d %c面を入れる%@", diskNo, sideCh, keyHint],
                 [NSString stringWithFormat:@"Insert Disk %d Side %c%@", diskNo, sideCh, keyHint]);
         }
         NSMenuItem *sideItem = add(title, @selector(insertFdsSideFromMenu:));

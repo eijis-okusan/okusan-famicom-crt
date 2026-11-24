@@ -58,6 +58,7 @@ app: $(CORE_DYLIB) $(OBJS) resources/Info.plist resources/AppIcon.icns resources
 	@mkdir -p "$(BUNDLE)/Contents/MacOS" "$(BUNDLE)/Contents/Frameworks" "$(BUNDLE)/Contents/Resources/shaders"
 	$(CXX) -arch $(ARCH) $(OBJCFLAGS) $(OBJS) $(FRAMEWORKS) -o "$(BIN)"
 	@cp resources/Info.plist "$(BUNDLE)/Contents/Info.plist"
+	@cp -R resources/ja.lproj resources/en.lproj "$(BUNDLE)/Contents/Resources/"
 	@cp resources/AppIcon.icns "$(BUNDLE)/Contents/Resources/AppIcon.icns"
 	@cp LICENSE "$(BUNDLE)/Contents/Resources/LICENSE.txt"
 	@cp resources/shaders/*.glsl resources/shaders/*.metal "$(BUNDLE)/Contents/Resources/shaders/"

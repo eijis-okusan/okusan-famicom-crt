@@ -240,9 +240,9 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
     [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.hdrEnabled = !c.hdrEnabled; }];
     const float hr = _screenView.activeHdrHeadroom;
     NSString *msg = _screenView.displayConfig.hdrEnabled
-                        ? app_l10n::tr([NSString stringWithFormat:@"HDR CRT (EDR): ON (%.1fx)", hr],
+                        ? app_l10n::tr([NSString stringWithFormat:@"HDR ピーク強調: オン (%.1f倍)", hr],
                                        [NSString stringWithFormat:@"HDR CRT (EDR): ON (%.1fx)", hr])
-                        : app_l10n::tr(@"HDR CRT (EDR): OFF (SDR)", @"HDR CRT (EDR): OFF (SDR)");
+                        : app_l10n::tr(@"HDR ピーク強調: オフ (SDR)", @"HDR CRT (EDR): OFF (SDR)");
     [_screenView showStatusBannerText:msg];
 }
 - (void)toggleHvBloom:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.hvBloom = (c.hvBloom > 0.1f) ? 0.0f : 1.0f; }]; }

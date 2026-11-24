@@ -19,13 +19,16 @@ void saveLanguageMode(AppLanguageMode mode) {
     switch (mode) {
     case AppLanguageMode::Japanese:
         [defaults setObject:@"ja" forKey:kLanguagePrefKey];
+        [defaults setObject:@[@"ja"] forKey:@"AppleLanguages"];
         break;
     case AppLanguageMode::English:
         [defaults setObject:@"en" forKey:kLanguagePrefKey];
+        [defaults setObject:@[@"en"] forKey:@"AppleLanguages"];
         break;
     case AppLanguageMode::System:
     default:
         [defaults setObject:@"auto" forKey:kLanguagePrefKey];
+        [defaults removeObjectForKey:@"AppleLanguages"];
         break;
     }
 }
@@ -38,7 +41,10 @@ BOOL usesJapaneseUI() {
         return NO;
     case AppLanguageMode::System:
     default: {
-        NSString *preferred = [NSLocale preferredLanguages].firstObject;
+        NSArray<NSString *> *globalLangs =
+            [[[NSUserDefaults standardUserDefaults] persistentDomainForName:NSGlobalDomain]
+                objectForKey:@"AppleLanguages"];
+        NSString *preferred = globalLangs.firstObject ?: [NSLocale preferredLanguages].firstObject;
         return [preferred hasPrefix:@"ja"];
     }
     }
