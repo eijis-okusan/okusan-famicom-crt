@@ -20,7 +20,7 @@ void main()
 #elif defined(FRAGMENT)
 
 const float SRC_GAMMA = 2.25;
-const float HV_CAP_BLEND = 0.58; // RC filter response toward the newest frame
+const float HV_CAP_BLEND = 0.62; // RC filter response toward the newest frame
 const vec3 LUMA_WEIGHTS = vec3(0.299, 0.587, 0.114);
 
 uniform sampler2D OrigTexture;

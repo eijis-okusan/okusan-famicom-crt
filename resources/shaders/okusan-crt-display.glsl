@@ -31,8 +31,8 @@ void main()
 const float SRC_GAMMA = 2.25;
 const float DISPLAY_INV_GAMMA = 1.0 / 2.2;
 const float BEAM_SIGMA_X = 0.55;
-const float BEAM_LOAD_KNEE = 0.14;
-const float HV_SAG_EXPANSION = 0.015;
+const float BEAM_LOAD_KNEE = 0.10;
+const float HV_SAG_EXPANSION = 0.022;
 const float NTSC_VISIBLE_LINES = 480.0; // 525 total NTSC lines minus 45 vertical blanking lines
 const vec3 GUN_CONVERGENCE = vec3(-0.13, 0.0, 0.16);
 const vec3 P22_DECAY = vec3(0.055, 0.11, 0.075);

@@ -38,8 +38,8 @@ void main()
 
 const float SRC_GAMMA = 2.02;
 const float DISPLAY_INV_GAMMA = 1.0 / 2.2;
-const float BEAM_LOAD_KNEE = 0.14;
-const float HV_SAG_EXPANSION = 0.022;
+const float BEAM_LOAD_KNEE = 0.10;
+const float HV_SAG_EXPANSION = 0.064;
 const float NTSC_VISIBLE_LINES = 480.0;
 const float PI = 3.14159265;
 const float SUBCARRIER_RAD_PER_TEXEL = 2.09439510; // 2 * pi / 3 per source pixel (~3.58 MHz)
