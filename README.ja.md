@@ -186,15 +186,17 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
    ├─ x6502.c / ppu.c / pputile.h / input.c / fds.c  <── フック ──>  okusan_cart.c / okusan_cart.h
    │   (3軸幾何・Vcc降下・XTALK・$4016 3Dシャッター・HVC-022 FDS ドライブ＆ERR.01〜28故障)
    ▼ (256x240 映像 / 48 kHz APU PCM / 60ピン・3D・FDS 状態)
-  C++17 コア制御層 (src/core/, Cocoa 非依存)
-   ├─ FamicomCore              (libretro ローダ・実行/リセット・ステート・60ピン/3D/FDS API)
-   └─ CartridgeFaultInjector   (コールドブート 60ピン接触不良生成＆起動検証)
+  ポータブル C++17 コア層（Cocoa / Metal / CoreAudio 非依存）
+   ├─ common/                  (FamicomTypes, DynamicLibrary Win32/POSIX ローダ, FdsBiosCache)
+   ├─ core/                    (FamicomCore & CartridgeFaultInjector: libretro / 60ピン / 3D / FDS API)
+   ├─ audio/                   (AudioPipeline & TvSpeakerDsp: リングバッファ・DRC・AMDF フリーズ合成)
+   └─ video/                   (CrtLayoutMath & FreezeFrameGenerator: 4:3/SBS計算・RF電源/砂嵐曲線)
    ▼
-  macOS UI・描画・音響層 (src/{app,audio,video,hud,input}/)
+  macOS UI・描画・音声バックエンド層 (src/{app,audio,video,hud,input}/*.mm)
    ├─ AppDelegate + AppMenuController + AppPreferences + EmulationPacer + FdsDriveController + LicensesWindow + AppLocalization
-   ├─ CrtScreenView + CrtMetalPipeline + StatusBanner + FreezeFrameGenerator + Metal シェーダ (`okusan-crt.metal`, RGBA16Float EDR)
+   ├─ CrtScreenView + CrtMetalPipeline + StatusBanner + Metal シェーダ (`okusan-crt.metal`, RGBA16Float EDR)
    ├─ CartConnectorHud         (1:1 mm ソケット断面図＆ライブピン監視)
-   ├─ MacAudioEngine + TvSpeakerDsp.hpp (CoreAudio DRC ＋ 小口径紙コーンEQ／インターキャリアバズ)
+   ├─ MacAudioEngine           (AudioPipeline へ繋ぐ薄い CoreAudio AudioUnit ドライバ)
    └─ InputBindings + InputPoller + ControllerSettingsWindow (キーボード ＋ GameController)
 ```
 
@@ -210,15 +212,17 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
 │   └── 60pin-hardware-notes.en.md  # 同仕様書（English）
 ├── resources/
 │   ├── shaders/                    # Metal 2-pass HDR/EDR シェーダ (`okusan-crt.metal`) ＋ 参照用 GLSL ソース
+│   ├── en.lproj/ & ja.lproj/       # ローカライズ済みアプリ名 (`InfoPlist.strings`)
 │   ├── AppIcon.icns                # macOS アプリアイコン
 │   └── Info.plist                  # バンドル情報（v0.6）
 ├── src/
-│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, EmulationPacer, FdsDriveController, LicensesWindow, AppLocalization
-│   ├── core/                       # FamicomCore & CartridgeFaultInjector（標準 C++17 の libretro/60ピン/3D/FDS API）
-│   ├── audio/                      # TvSpeakerDsp.hpp（標準 C++17）と MacAudioEngine（CoreAudio + DRC）
-│   ├── video/                      # FreezeFrameGenerator（標準 C++17）, CrtScreenView, CrtMetalPipeline, StatusBanner
-│   ├── hud/                        # CartConnectorHud（CoreGraphics 1:1 mm コネクタ＆解析UI）
-│   └── input/                      # InputBindings, InputPoller, ControllerSettingsWindow
+│   ├── common/                     # 純粋 C++17 共通型 (`FamicomTypes.hpp`)、`DynamicLibrary.hpp`、`FdsBiosCache.{hpp,cpp}`
+│   ├── core/                       # `FamicomCore` & `CartridgeFaultInjector`（純粋 C++17 の libretro/60ピン/3D/FDS API）
+│   ├── audio/                      # `AudioPipeline.{hpp,cpp}` & `TvSpeakerDsp.hpp`（純粋 C++17）＋ 薄い `MacAudioEngine` (CoreAudio)
+│   ├── video/                      # `CrtLayoutMath.{hpp,cpp}` & `FreezeFrameGenerator.{hpp,cpp}`（純粋 C++17）＋ Metal 描画層
+│   ├── hud/                        # `CartConnectorHud`（CoreGraphics 1:1 mm コネクタ＆解析UI）
+│   ├── input/                      # `InputBindings`, `InputPoller`, `ControllerSettingsWindow`
+│   └── app/                        # `main`, `AppDelegate`, `AppMenuController`, `AppPreferences`, `EmulationPacer`, `FdsDriveController`, `LicensesWindow`, `AppLocalization`
 ├── third_party/
 │   └── fceumm/                     # 60ピン物理・3Dシャッター・FDS・CPU/PPU フックを組み込んだ FCEUmm コア
 ├── LICENSE                         # GNU General Public License v2.0
@@ -227,7 +231,7 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
 └── README.ja.md
 ```
 
-**今後のマルチプラットフォーム拡張について**：`src/core/`、`src/video/FreezeFrameGenerator.{hpp,cpp}`、`src/audio/TvSpeakerDsp.hpp`、`resources/shaders/`、`third_party/fceumm/` は Cocoa 非依存で分離されているため、今後 Windows / Linux 版フロントエンド（SDL2 + CMake 等）を追加する際もそのまま共有できます。
+**今後のマルチプラットフォーム拡張について**：純粋 C++17 のコア層（`src/common/`、`src/core/`、`src/audio/AudioPipeline.{hpp,cpp}`、`src/audio/TvSpeakerDsp.hpp`、`src/video/CrtLayoutMath.{hpp,cpp}`、`src/video/FreezeFrameGenerator.{hpp,cpp}`）および `resources/shaders/`、`third_party/fceumm/` は Apple 固有ヘッダを一切含まないため、Windows / Linux 版フロントエンド（SDL2 + Vulkan / Direct3D / OpenGL 等）を追加する際もそのまま共有できます。
 
 ---
 

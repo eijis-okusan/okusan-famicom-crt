@@ -3,31 +3,9 @@
 #import <Cocoa/Cocoa.h>
 #import <MetalKit/MetalKit.h>
 #include <cstdint>
-#include "audio/MacAudioEngine.hpp"
+#include "common/FamicomTypes.hpp"
 
 class FamicomCore;
-
-/**
- * User-configurable analog television and CRT tube display options.
- */
-struct CrtDisplayConfig {
-    bool rfMode = true;        // false = RGB Monitor, true = VHF RF Television
-    bool monochrome = false;   // true (when rfMode) = 1970s P4 B&W RF television
-    bool interlaced = true;    // true = 480i scanlines, false = 240p
-    bool hdrEnabled = true;    // true = unlock macOS EDR headroom + CRT ABL physics
-    float hvBloom = 1.0f;      // Flyback high-voltage bloom strength (0.0 .. 2.0)
-    float curvature = 1.0f;    // CRT glass barrel curvature (0.0 .. 1.5)
-    float slotMask = 1.0f;     // Shadow/slot mask intensity (0.0 .. 1.5)
-    float rfSnow = 1.0f;       // RF noise floor (0.0 .. 2.0)
-    float rfSignal = 1.0f;     // RF interference / chroma artifact level (0.0 .. 2.0)
-};
-
-enum class Famicom3dViewMode : int {
-    NakedCrt       = 0, // Normal 60Hz unshuttered CRT (default)
-    ShutterGlasses = 1, // HVC-031 TN-LCD 30Hz shutter overlay
-    ParallelSbs    = 2, // Side-by-side stereo (L | R)
-    CrossSbs       = 3  // Cross-eyed side-by-side stereo (R | L)
-};
 
 @protocol CrtScreenDelegate <NSObject>
 - (void)crtScreenDidReceiveKeyDown:(NSEvent *)event;

@@ -2,7 +2,7 @@
 
 #include <cstdint>
 #include <vector>
-#include "audio/MacAudioEngine.hpp"
+#include "common/FamicomTypes.hpp"
 
 /**
  * Generates deterministic, hardware-authentic NES crash screens for the

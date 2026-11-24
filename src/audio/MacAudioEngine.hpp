@@ -3,17 +3,12 @@
 #include <cstddef>
 #include <cstdint>
 
-enum class FreezeStyle : int {
-    CleanTone = 0,
-    MachineGunStutter,
-    PaletteCorruption,
-    VramGarbage,
-    Count
-};
+#include "audio/AudioPipeline.hpp"
+#include "common/FamicomTypes.hpp"
 
 /**
- * CoreAudio output stream fed from the emulation thread through a lock-free
- * ring buffer, with integrated TV speaker DSP and cartridge-freeze waveform synthesis.
+ * macOS CoreAudio (AudioUnit) output driver backed by the portable `AudioPipeline`
+ * DSP + lock-free ring buffer.
  */
 class MacAudioEngine {
 public:
@@ -31,7 +26,7 @@ public:
     void pushFrozenFrames(size_t frameCount);
 
     void setMuted(bool muted);
-    bool isMuted() const { return muted_; }
+    bool isMuted() const { return pipeline_.isMuted(); }
 
     void setRfTvMode(bool enabled, float rfSnow, float rfSignal);
     void setCartridgeAudioGain(float gain);
@@ -40,12 +35,11 @@ public:
     void setResetHeld(bool held);
     void setFrozen(bool frozen, FreezeStyle style = FreezeStyle::CleanTone, uint32_t seed = 0);
 
-    size_t queuedFrames() const;
-    size_t targetBufferFrames() const { return targetFrames_; }
+    size_t queuedFrames() const { return pipeline_.queuedFrames(); }
+    size_t targetBufferFrames() const { return pipeline_.targetBufferFrames(); }
 
 private:
-    struct RingState;
-    RingState *ring_;
-    bool muted_ = false;
-    size_t targetFrames_ = 2048;
+    struct Impl;
+    Impl *impl_;
+    AudioPipeline pipeline_;
 };

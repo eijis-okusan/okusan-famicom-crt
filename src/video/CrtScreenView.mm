@@ -2,6 +2,7 @@
 #import "app/AppLocalization.hpp"
 #import "core/FamicomCore.hpp"
 #import "hud/CartConnectorHud.hpp"
+#import "video/CrtLayoutMath.hpp"
 #import "video/CrtMetalPipeline.hpp"
 #import "video/FreezeFrameGenerator.hpp"
 #import "video/StatusBanner.hpp"
@@ -490,53 +491,16 @@ NSString *firstDroppedRomPath(NSPasteboard *pasteboard) {
     }
 }
 
-- (void)computeFitted4x3ViewportForWidth:(int)backingW
-                                 height:(int)backingH
-                                   outX:(int *)outX
-                                   outY:(int *)outY
-                                   outW:(int *)outW
-                                   outH:(int *)outH {
-    const double targetAspect = 4.0 / 3.0;
-    const double viewAspect = (backingH > 0) ? (static_cast<double>(backingW) / static_cast<double>(backingH)) : targetAspect;
-    *outX = 0;
-    *outY = 0;
-    *outW = backingW;
-    *outH = backingH;
-    if (viewAspect > targetAspect) {
-        *outW = static_cast<int>(backingH * targetAspect + 0.5);
-        *outX = (backingW - *outW) / 2;
-    } else if (viewAspect < targetAspect) {
-        *outH = static_cast<int>(backingW / targetAspect + 0.5);
-        *outY = (backingH - *outH) / 2;
-    }
-}
-
 - (void)computeRfStandby:(float *)outStandbySnow jitter:(float *)outPowerJitter cartPowered:(BOOL)cartPowered {
-    const double powerAge = CFAbsoluteTimeGetCurrent() - _powerSwitchTime;
-    float standbySnow = 0.0f;
-    float powerJitter = 0.0f;
-
-    if (!_consolePowered) {
-        if (powerAge < 0.085) {
-            powerJitter = 1.0f - static_cast<float>(powerAge / 0.085);
-        } else {
-            standbySnow = 1.0f;
-        }
-    } else if (!cartPowered) {
-        // Browned-out or disconnected cartridge power cuts the video modulator carrier.
-        standbySnow = 1.0f;
-    } else {
-        if (powerAge < 0.16) {
-            powerJitter = std::exp(-static_cast<float>(powerAge) * 16.0f);
-        }
-        const double bumpAge = CFAbsoluteTimeGetCurrent() - _transientTime;
-        if (_transientPeak > 0.0f && bumpAge >= 0.0 && bumpAge < 0.14) {
-            powerJitter = std::max(powerJitter,
-                                   _transientPeak * std::exp(-static_cast<float>(bumpAge) * _transientDecay));
-        }
-    }
-    *outStandbySnow = standbySnow;
-    *outPowerJitter = powerJitter;
+    const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    crt_layout::computeRfStandbyAndJitter(_consolePowered != NO,
+                                          cartPowered != NO,
+                                          now - _powerSwitchTime,
+                                          now - _transientTime,
+                                          _transientPeak,
+                                          _transientDecay,
+                                          *outStandbySnow,
+                                          *outPowerJitter);
 }
 
 - (crt_mtl::CrtUniforms)makeUniformsWithInputW:(float)inputW
@@ -582,35 +546,6 @@ NSString *firstDroppedRomPath(NSPasteboard *pasteboard) {
     [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
     [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     [enc endEncoding];
-}
-
-- (void)computeSbsViewportsForWidth:(int)backingW
-                             height:(int)backingH
-                           parallel:(BOOL)isParallel
-                            outLeft:(NSRect *)leftRect
-                           outRight:(NSRect *)rightRect {
-    const float scale = (self.bounds.size.width > 1.0)
-                            ? std::max(1.0f, static_cast<float>(backingW) / static_cast<float>(self.bounds.size.width))
-                            : 1.0f;
-    const double gap = 22.0 * scale;
-    const double marginX = 24.0 * scale;
-    const double marginY = 20.0 * scale;
-    double maxPairW = std::max(120.0, static_cast<double>(backingW) - marginX * 2.0);
-    if (isParallel) {
-        maxPairW = std::min(maxPairW, 640.0 * scale);
-    }
-    const double maxPairH = std::max(90.0, static_cast<double>(backingH) - marginY * 2.0);
-    double eyeW = (maxPairW - gap) * 0.5;
-    double eyeH = eyeW * (3.0 / 4.0);
-    if (eyeH > maxPairH) {
-        eyeH = maxPairH;
-        eyeW = eyeH * (4.0 / 3.0);
-    }
-    const double totalW = eyeW * 2.0 + gap;
-    const double startX = (static_cast<double>(backingW) - totalW) * 0.5;
-    const double startY = (static_cast<double>(backingH) - eyeH) * 0.5;
-    *leftRect = NSMakeRect(startX, startY, eyeW, eyeH);
-    *rightRect = NSMakeRect(startX + eyeW + gap, startY, eyeW, eyeH);
 }
 
 - (void)encodeDisplayPassOnEncoder:(id<MTLRenderCommandEncoder>)enc
@@ -662,8 +597,11 @@ NSString *firstDroppedRomPath(NSPasteboard *pasteboard) {
                                      backingH:(int)backingH
                                   cartPowered:(BOOL)cartPowered {
     const BOOL isParallel = (_view3dMode == Famicom3dViewMode::ParallelSbs);
-    NSRect lRect = NSZeroRect, rRect = NSZeroRect;
-    [self computeSbsViewportsForWidth:backingW height:backingH parallel:isParallel outLeft:&lRect outRight:&rRect];
+    const float backingScale = (self.bounds.size.width > 1.0)
+                                 ? static_cast<float>(backingW) / static_cast<float>(self.bounds.size.width)
+                                 : 1.0f;
+    CrtViewportRect leftVp{}, rightVp{};
+    crt_layout::computeSbsStereoViewports(backingW, backingH, backingScale, isParallel != NO, leftVp, rightVp);
 
     id<MTLTexture> logicalLeft = _invert3dEyes ? _eyeRightTex : _eyeLeftTex;
     id<MTLTexture> logicalRight = _invert3dEyes ? _eyeLeftTex : _eyeRightTex;
@@ -671,7 +609,7 @@ NSString *firstDroppedRomPath(NSPasteboard *pasteboard) {
         isParallel ? logicalLeft : logicalRight,
         isParallel ? logicalRight : logicalLeft
     };
-    const NSRect rects[2] = {lRect, rRect};
+    const CrtViewportRect viewports[2] = {leftVp, rightVp};
 
     for (int i = 0; i < 2; ++i) {
         id<MTLTexture> mainTex = screenEyes[i];
@@ -683,10 +621,10 @@ NSString *firstDroppedRomPath(NSPasteboard *pasteboard) {
         [self encodeDisplayPassOnEncoder:enc
                                  mainTex:mainTex
                                  prevTex:prevTex
-                               viewportX:static_cast<int>(std::llround(rects[i].origin.x))
-                               viewportY:static_cast<int>(std::llround(rects[i].origin.y))
-                               viewportW:static_cast<int>(std::llround(rects[i].size.width))
-                               viewportH:static_cast<int>(std::llround(rects[i].size.height))
+                               viewportX:viewports[i].x
+                               viewportY:viewports[i].y
+                               viewportW:viewports[i].w
+                               viewportH:viewports[i].h
                                 uniforms:baseU
                              cartPowered:cartPowered
                           shutterOverlay:NO
@@ -768,14 +706,12 @@ NSString *firstDroppedRomPath(NSPasteboard *pasteboard) {
                                              : MTLClearColorMake(0.00031, 0.00046, 0.00062, 1.0);
 
     if (canDrawCrt) {
-        int viewX = 0, viewY = 0, viewW = backingW, viewH = backingH;
-        [self computeFitted4x3ViewportForWidth:backingW height:backingH
-                                          outX:&viewX outY:&viewY outW:&viewW outH:&viewH];
+        const CrtViewportRect vp = crt_layout::computeFitted4x3Viewport(backingW, backingH);
 
         const crt_mtl::CrtUniforms baseU = [self makeUniformsWithInputW:static_cast<float>(_core->width())
                                                                  inputH:static_cast<float>(_core->height())
-                                                                   outW:static_cast<float>(viewW)
-                                                                   outH:static_cast<float>(viewH)
+                                                                   outW:static_cast<float>(vp.w)
+                                                                   outH:static_cast<float>(vp.h)
                                                             cartPowered:cartPowered];
         const bool useSbs = _core->is3dSystemActive() &&
                             (_view3dMode == Famicom3dViewMode::ParallelSbs ||
@@ -786,7 +722,7 @@ NSString *firstDroppedRomPath(NSPasteboard *pasteboard) {
                                                backingW:backingW backingH:backingH cartPowered:cartPowered];
         } else {
             [self encodeSingleViewOnCommandBuffer:cmdBuf passDescriptor:rpd baseUniforms:baseU
-                                            viewX:viewX viewY:viewY viewW:viewW viewH:viewH cartPowered:cartPowered];
+                                            viewX:vp.x viewY:vp.y viewW:vp.w viewH:vp.h cartPowered:cartPowered];
         }
         [self encodeOverlaysOnCommandBuffer:cmdBuf passDescriptor:rpd backingW:backingW backingH:backingH];
     } else {

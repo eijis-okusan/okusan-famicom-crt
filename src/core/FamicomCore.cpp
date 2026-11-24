@@ -1,11 +1,11 @@
 #include "FamicomCore.hpp"
+#include "common/DynamicLibrary.hpp"
 
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <fstream>
 #include <utility>
 
@@ -54,16 +54,10 @@ struct RetroLogCallback {
     void (*log)(int level, const char *fmt, ...);
 };
 
-template <typename FnPtr>
-bool resolveSymbol(void *libraryHandle, const char *symbolName, FnPtr &outFn) {
-    outFn = reinterpret_cast<FnPtr>(dlsym(libraryHandle, symbolName));
-    return outFn != nullptr;
-}
-
 } // namespace
 
 struct FamicomCore::CoreState {
-    void *libraryHandle = nullptr;
+    DynamicLibrary library;
     bool loaded = false;
     std::string systemDir;
     std::string saveDir;
@@ -287,59 +281,57 @@ bool FamicomCore::load(const std::string &coreLibraryPath,
 
     state_->systemDir = systemDir;
     state_->saveDir = saveDir;
-    state_->libraryHandle = dlopen(coreLibraryPath.c_str(), RTLD_NOW);
-    if (!state_->libraryHandle) {
-        std::fprintf(stderr, "Failed to open core library %s: %s\n", coreLibraryPath.c_str(), dlerror());
+    if (!state_->library.open(coreLibraryPath)) {
         return false;
     }
 
     bool symbolsOk = true;
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_set_environment", state_->retro_set_environment);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_set_video_refresh", state_->retro_set_video_refresh);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_set_audio_sample", state_->retro_set_audio_sample);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_set_audio_sample_batch", state_->retro_set_audio_sample_batch);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_set_input_poll", state_->retro_set_input_poll);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_set_input_state", state_->retro_set_input_state);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_init", state_->retro_init);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_deinit", state_->retro_deinit);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_get_system_info", state_->retro_get_system_info);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_get_system_av_info", state_->retro_get_system_av_info);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_set_controller_port_device", state_->retro_set_controller_port_device);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_reset", state_->retro_reset);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_run", state_->retro_run);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_serialize_size", state_->retro_serialize_size);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_serialize", state_->retro_serialize);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_unserialize", state_->retro_unserialize);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_load_game", state_->retro_load_game);
-    symbolsOk &= resolveSymbol(state_->libraryHandle, "retro_unload_game", state_->retro_unload_game);
+    symbolsOk &= state_->library.resolve("retro_set_environment", state_->retro_set_environment);
+    symbolsOk &= state_->library.resolve("retro_set_video_refresh", state_->retro_set_video_refresh);
+    symbolsOk &= state_->library.resolve("retro_set_audio_sample", state_->retro_set_audio_sample);
+    symbolsOk &= state_->library.resolve("retro_set_audio_sample_batch", state_->retro_set_audio_sample_batch);
+    symbolsOk &= state_->library.resolve("retro_set_input_poll", state_->retro_set_input_poll);
+    symbolsOk &= state_->library.resolve("retro_set_input_state", state_->retro_set_input_state);
+    symbolsOk &= state_->library.resolve("retro_init", state_->retro_init);
+    symbolsOk &= state_->library.resolve("retro_deinit", state_->retro_deinit);
+    symbolsOk &= state_->library.resolve("retro_get_system_info", state_->retro_get_system_info);
+    symbolsOk &= state_->library.resolve("retro_get_system_av_info", state_->retro_get_system_av_info);
+    symbolsOk &= state_->library.resolve("retro_set_controller_port_device", state_->retro_set_controller_port_device);
+    symbolsOk &= state_->library.resolve("retro_reset", state_->retro_reset);
+    symbolsOk &= state_->library.resolve("retro_run", state_->retro_run);
+    symbolsOk &= state_->library.resolve("retro_serialize_size", state_->retro_serialize_size);
+    symbolsOk &= state_->library.resolve("retro_serialize", state_->retro_serialize);
+    symbolsOk &= state_->library.resolve("retro_unserialize", state_->retro_unserialize);
+    symbolsOk &= state_->library.resolve("retro_load_game", state_->retro_load_game);
+    symbolsOk &= state_->library.resolve("retro_unload_game", state_->retro_unload_game);
     if (!symbolsOk) {
         unload();
         return false;
     }
 
     // Optional extensions (present in our patched fceumm binary).
-    resolveSymbol(state_->libraryHandle, "okusan_set_cart_contact", state_->okusan_set_cart_contact);
-    resolveSymbol(state_->libraryHandle, "okusan_set_cart_contact3", state_->okusan_set_cart_contact3);
-    resolveSymbol(state_->libraryHandle, "okusan_set_pin_fault_masks", state_->okusan_set_pin_fault_masks);
-    resolveSymbol(state_->libraryHandle, "okusan_reseat_cart_contact", state_->okusan_reseat_cart_contact);
-    resolveSymbol(state_->libraryHandle, "okusan_get_pin_telemetry60", state_->okusan_get_pin_telemetry60);
-    resolveSymbol(state_->libraryHandle, "okusan_cart_edge_rise_um", state_->okusan_cart_edge_rise_um);
-    resolveSymbol(state_->libraryHandle, "okusan_cart_lat_shift_um", state_->okusan_cart_lat_shift_um);
-    resolveSymbol(state_->libraryHandle, "okusan_get_audio_contact_q", state_->okusan_get_audio_contact_q);
-    resolveSymbol(state_->libraryHandle, "okusan_cart_is_powered", state_->okusan_cart_is_powered);
-    resolveSymbol(state_->libraryHandle, "okusan_cart_vcc_mv", state_->okusan_cart_vcc_mv);
-    resolveSymbol(state_->libraryHandle, "okusan_get_cpu_jammed", state_->okusan_get_cpu_jammed);
-    resolveSymbol(state_->libraryHandle, "okusan_get_cpu_pc", state_->okusan_get_cpu_pc);
-    resolveSymbol(state_->libraryHandle, "okusan_get_3d_system_active", state_->okusan_get_3d_system_active);
-    resolveSymbol(state_->libraryHandle, "okusan_get_3d_current_eye", state_->okusan_get_3d_current_eye);
-    resolveSymbol(state_->libraryHandle, "okusan_fds_is_active", state_->okusan_fds_is_active);
-    resolveSymbol(state_->libraryHandle, "okusan_fds_get_status", state_->okusan_fds_get_status);
-    resolveSymbol(state_->libraryHandle, "okusan_fds_hot_swap_disk", state_->okusan_fds_hot_swap_disk);
-    resolveSymbol(state_->libraryHandle, "okusan_fds_eject_disk", state_->okusan_fds_eject_disk);
-    resolveSymbol(state_->libraryHandle, "okusan_fds_set_side", state_->okusan_fds_set_side);
-    resolveSymbol(state_->libraryHandle, "okusan_fds_clear_fault", state_->okusan_fds_clear_fault);
-    resolveSymbol(state_->libraryHandle, "okusan_fds_trigger_random_fault", state_->okusan_fds_trigger_random_fault);
-    resolveSymbol(state_->libraryHandle, "okusan_fds_get_side_ptr", state_->okusan_fds_get_side_ptr);
+    state_->library.resolve("okusan_set_cart_contact", state_->okusan_set_cart_contact);
+    state_->library.resolve("okusan_set_cart_contact3", state_->okusan_set_cart_contact3);
+    state_->library.resolve("okusan_set_pin_fault_masks", state_->okusan_set_pin_fault_masks);
+    state_->library.resolve("okusan_reseat_cart_contact", state_->okusan_reseat_cart_contact);
+    state_->library.resolve("okusan_get_pin_telemetry60", state_->okusan_get_pin_telemetry60);
+    state_->library.resolve("okusan_cart_edge_rise_um", state_->okusan_cart_edge_rise_um);
+    state_->library.resolve("okusan_cart_lat_shift_um", state_->okusan_cart_lat_shift_um);
+    state_->library.resolve("okusan_get_audio_contact_q", state_->okusan_get_audio_contact_q);
+    state_->library.resolve("okusan_cart_is_powered", state_->okusan_cart_is_powered);
+    state_->library.resolve("okusan_cart_vcc_mv", state_->okusan_cart_vcc_mv);
+    state_->library.resolve("okusan_get_cpu_jammed", state_->okusan_get_cpu_jammed);
+    state_->library.resolve("okusan_get_cpu_pc", state_->okusan_get_cpu_pc);
+    state_->library.resolve("okusan_get_3d_system_active", state_->okusan_get_3d_system_active);
+    state_->library.resolve("okusan_get_3d_current_eye", state_->okusan_get_3d_current_eye);
+    state_->library.resolve("okusan_fds_is_active", state_->okusan_fds_is_active);
+    state_->library.resolve("okusan_fds_get_status", state_->okusan_fds_get_status);
+    state_->library.resolve("okusan_fds_hot_swap_disk", state_->okusan_fds_hot_swap_disk);
+    state_->library.resolve("okusan_fds_eject_disk", state_->okusan_fds_eject_disk);
+    state_->library.resolve("okusan_fds_set_side", state_->okusan_fds_set_side);
+    state_->library.resolve("okusan_fds_clear_fault", state_->okusan_fds_clear_fault);
+    state_->library.resolve("okusan_fds_trigger_random_fault", state_->okusan_fds_trigger_random_fault);
+    state_->library.resolve("okusan_fds_get_side_ptr", state_->okusan_fds_get_side_ptr);
 
     CoreState::activeInstance = state_;
     state_->retro_set_environment(CoreState::onEnvironment);
@@ -379,11 +371,10 @@ bool FamicomCore::load(const std::string &coreLibraryPath,
 }
 
 void FamicomCore::unload() {
-    if (state_->libraryHandle) {
+    if (state_->library.isOpen()) {
         if (state_->loaded && state_->retro_unload_game) state_->retro_unload_game();
         if (state_->retro_deinit) state_->retro_deinit();
-        dlclose(state_->libraryHandle);
-        state_->libraryHandle = nullptr;
+        state_->library.close();
     }
     if (CoreState::activeInstance == state_) {
         CoreState::activeInstance = nullptr;

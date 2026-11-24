@@ -13,8 +13,11 @@ CXXFLAGS   := -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc -arch $(A
 OBJCFLAGS  := -fobjc-arc
 FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework AudioToolbox -framework GameController -framework QuartzCore -framework UniformTypeIdentifiers
 
-CPP_SRCS   := src/core/FamicomCore.cpp \
+CPP_SRCS   := src/common/FdsBiosCache.cpp \
+              src/core/FamicomCore.cpp \
               src/core/CartridgeFaultInjector.cpp \
+              src/audio/AudioPipeline.cpp \
+              src/video/CrtLayoutMath.cpp \
               src/video/FreezeFrameGenerator.cpp
 MM_SRCS    := src/app/main.mm \
               src/app/AppDelegate.mm \

@@ -187,15 +187,17 @@ The UI automatically matches your macOS system language on launch, and can be sw
    ├─ x6502.c / ppu.c / pputile.h / input.c / fds.c  <── Hooks ──>  okusan_cart.c / okusan_cart.h
    │   (3-DOF geometry, Vcc, XTALK, $4016 3D shutter, HVC-022 FDS drive & ERR.01..28 faults)
    ▼ (256x240 video, 48 kHz APU PCM, 60-pin / 3D / FDS telemetry)
-  C++17 Core Engine (src/core/, Zero Cocoa deps)
-   ├─ FamicomCore              (libretro loader, run/reset, savestate, 60-pin / 3D / FDS API)
-   └─ CartridgeFaultInjector   (cold-boot 60-pin fault synthesizer & boot prober)
+  Portable C++17 Engine Layer (Zero Cocoa / Metal / CoreAudio deps)
+   ├─ common/                  (FamicomTypes, DynamicLibrary Win32/POSIX loader, FdsBiosCache)
+   ├─ core/                    (FamicomCore & CartridgeFaultInjector: libretro, 60-pin, 3D, FDS API)
+   ├─ audio/                   (AudioPipeline & TvSpeakerDsp: ring buffer, DRC, AMDF freeze synthesis)
+   └─ video/                   (CrtLayoutMath & FreezeFrameGenerator: 4:3/SBS viewports, RF standby curve)
    ▼
-  macOS Presentation Layer (src/{app,audio,video,hud,input}/)
+  macOS Presentation Layer (src/{app,audio,video,hud,input}/*.mm)
    ├─ AppDelegate + AppMenuController + AppPreferences + EmulationPacer + FdsDriveController + LicensesWindow + AppLocalization
-   ├─ CrtScreenView + CrtMetalPipeline + StatusBanner + FreezeFrameGenerator + Metal Shaders (`okusan-crt.metal`, RGBA16Float EDR)
+   ├─ CrtScreenView + CrtMetalPipeline + StatusBanner + Metal Shaders (`okusan-crt.metal`, RGBA16Float EDR)
    ├─ CartConnectorHud         (1:1 mm socket cutaway & live pin bus inspector)
-   ├─ MacAudioEngine + TvSpeakerDsp.hpp (CoreAudio DRC + paper-cone EQ / intercarrier buzz)
+   ├─ MacAudioEngine           (thin CoreAudio AudioUnit driver backed by AudioPipeline)
    └─ InputBindings + InputPoller + ControllerSettingsWindow (keyboard + GameController)
 ```
 
@@ -211,15 +213,17 @@ The UI automatically matches your macOS system language on launch, and can be sw
 │   └── 60pin-hardware-notes.md     # Detailed 60-pin physical & bus spec (Japanese)
 ├── resources/
 │   ├── shaders/                    # Metal 2-pass HDR/EDR shader (`okusan-crt.metal`) + GLSL reference sources
+│   ├── en.lproj/ & ja.lproj/       # Localized InfoPlist strings (`CFBundleName` / `CFBundleDisplayName`)
 │   ├── AppIcon.icns                # macOS app icon
 │   └── Info.plist                  # Bundle metadata (v0.6)
 ├── src/
-│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, EmulationPacer, FdsDriveController, LicensesWindow, AppLocalization
-│   ├── core/                       # FamicomCore & CartridgeFaultInjector (pure C++17 libretro/60-pin/3D/FDS API)
-│   ├── audio/                      # TvSpeakerDsp.hpp (pure C++17) & MacAudioEngine (CoreAudio + DRC)
-│   ├── video/                      # FreezeFrameGenerator (pure C++17), CrtScreenView, CrtMetalPipeline, StatusBanner
-│   ├── hud/                        # CartConnectorHud (CoreGraphics 1:1 mm connector & inspector)
-│   └── input/                      # InputBindings, InputPoller, ControllerSettingsWindow
+│   ├── common/                     # Pure C++17 shared types (`FamicomTypes.hpp`), `DynamicLibrary.hpp`, `FdsBiosCache.{hpp,cpp}`
+│   ├── core/                       # `FamicomCore` & `CartridgeFaultInjector` (pure C++17 libretro/60-pin/3D/FDS API)
+│   ├── audio/                      # `AudioPipeline.{hpp,cpp}` & `TvSpeakerDsp.hpp` (pure C++17) + thin `MacAudioEngine` (CoreAudio)
+│   ├── video/                      # `CrtLayoutMath.{hpp,cpp}` & `FreezeFrameGenerator.{hpp,cpp}` (pure C++17) + Metal view/pipeline
+│   ├── hud/                        # `CartConnectorHud` (CoreGraphics 1:1 mm connector & inspector)
+│   ├── input/                      # `InputBindings`, `InputPoller`, `ControllerSettingsWindow`
+│   └── app/                        # `main`, `AppDelegate`, `AppMenuController`, `AppPreferences`, `EmulationPacer`, `FdsDriveController`, `LicensesWindow`, `AppLocalization`
 ├── third_party/
 │   └── fceumm/                     # Modified libretro-fceumm core source (okusan_cart.c/.h, 3D shutter, FDS, CPU/PPU hooks)
 ├── LICENSE                         # GNU General Public License v2.0
@@ -228,7 +232,7 @@ The UI automatically matches your macOS system language on launch, and can be sw
 └── README.ja.md
 ```
 
-**Cross-platform note**: `src/core/`, `src/video/FreezeFrameGenerator.{hpp,cpp}`, `src/audio/TvSpeakerDsp.hpp`, `resources/shaders/`, and `third_party/fceumm/` have zero Cocoa dependencies, making it straightforward to add a Windows/Linux frontend (e.g., via SDL2 + CMake) in future releases.
+**Cross-platform note**: All pure C++17 core modules (`src/common/`, `src/core/`, `src/audio/AudioPipeline.{hpp,cpp}`, `src/audio/TvSpeakerDsp.hpp`, `src/video/CrtLayoutMath.{hpp,cpp}`, `src/video/FreezeFrameGenerator.{hpp,cpp}`), `resources/shaders/`, and `third_party/fceumm/` compile without any Cocoa/Apple dependencies, ready for Windows/Linux frontends (e.g., SDL2 + Vulkan/D3D/OpenGL).
 
 ---
 

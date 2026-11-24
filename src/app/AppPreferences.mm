@@ -1,23 +1,10 @@
 #import "app/AppPreferences.hpp"
-#import "video/CrtScreenView.hpp"
+#import "common/FamicomTypes.hpp"
+#import "common/FdsBiosCache.hpp"
 
-#include <algorithm>
-#include <cstring>
-#include <fstream>
-#include <vector>
+#include <string>
 
 namespace app_prefs {
-
-namespace {
-
-NSString *sanitizedStem(NSString *path, NSString *fallback) {
-    NSString *baseName = path ? [[path lastPathComponent] stringByDeletingPathExtension] : fallback;
-    NSCharacterSet *unsafe = [[NSCharacterSet alphanumericCharacterSet] invertedSet];
-    NSString *sanitized = [[baseName componentsSeparatedByCharactersInSet:unsafe] componentsJoinedByString:@"_"];
-    return (sanitized.length == 0) ? fallback : sanitized;
-}
-
-} // namespace
 
 std::string applicationSupportDirectory() {
     NSArray<NSString *> *dirs = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
@@ -28,53 +15,18 @@ std::string applicationSupportDirectory() {
 }
 
 std::string quickStatePathForRom(NSString *romPath) {
-    return applicationSupportDirectory() + "/quickstate_" +
-           std::string([sanitizedStem(romPath, @"game") UTF8String]) + ".ss";
+    const std::string utf8 = romPath ? std::string([romPath UTF8String]) : std::string();
+    return famicom_storage::quickStatePath(applicationSupportDirectory(), utf8);
 }
 
 std::string fdsSaveDiffPathForDisk(NSString *diskPath) {
-    return applicationSupportDirectory() + "/fds_diff_" +
-           std::string([sanitizedStem(diskPath, @"fds") UTF8String]) + ".ofds";
+    const std::string utf8 = diskPath ? std::string([diskPath UTF8String]) : std::string();
+    return famicom_storage::fdsSaveDiffPath(applicationSupportDirectory(), utf8);
 }
 
 void cacheFdsBiosIfValid(NSString *romPath) {
     if (!romPath || romPath.length == 0) return;
-    std::ifstream ifs([romPath UTF8String], std::ios::binary);
-    if (!ifs.is_open()) return;
-    ifs.seekg(0, std::ios::end);
-    const std::streamoff sz = ifs.tellg();
-    if (sz < 8192 || sz > 65552) return;
-    ifs.seekg(0, std::ios::beg);
-    std::vector<uint8_t> buf(static_cast<size_t>(sz));
-    if (!ifs.read(reinterpret_cast<char *>(buf.data()), sz)) return;
-
-    size_t prgStart = 0;
-    if (buf.size() >= 16 && std::memcmp(buf.data(), "NES\x1a", 4) == 0) {
-        if (buf[5] != 0) return; // FDS BIOS never uses CHR-ROM
-        prgStart = 16u + ((buf[6] & 4u) ? 512u : 0u);
-    }
-    if (buf.size() <= prgStart || (buf.size() - prgStart) < 8192u) return;
-
-    static constexpr char kHvcSig[] = "*NINTENDO-HVC*";
-    const size_t numChunks = (buf.size() - prgStart) / 8192u;
-    const uint8_t *matched = nullptr;
-    for (size_t idx = numChunks; idx > 0; --idx) {
-        const uint8_t *chunk = buf.data() + prgStart + (idx - 1) * 8192u;
-        if (chunk[0x1FFD] >= 0xE0) {
-            const uint8_t *end = chunk + 8192u;
-            if (std::search(chunk, end, kHvcSig, kHvcSig + 14) != end) {
-                matched = chunk;
-                break;
-            }
-        }
-    }
-    if (!matched) return;
-
-    const std::string dest = applicationSupportDirectory() + "/disksys.rom";
-    std::ofstream ofs(dest, std::ios::binary | std::ios::trunc);
-    if (ofs.is_open()) {
-        ofs.write(reinterpret_cast<const char *>(matched), 8192);
-    }
+    famicom_storage::cacheFdsBiosIfValid(std::string([romPath UTF8String]), applicationSupportDirectory());
 }
 
 void loadDisplayPreferences(CrtDisplayConfig &config, bool &outMuted, bool &outInvert3dEyes) {
