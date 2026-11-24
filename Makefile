@@ -9,9 +9,9 @@ CORE_DYLIB := $(CORE_DIR)/fceumm_libretro.dylib
 
 ARCH       ?= $(shell uname -m)
 CXX        := clang++
-CXXFLAGS   := -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc -DGL_SILENCE_DEPRECATION -arch $(ARCH)
+CXXFLAGS   := -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc -arch $(ARCH)
 OBJCFLAGS  := -fobjc-arc
-FRAMEWORKS := -framework Cocoa -framework OpenGL -framework AudioToolbox -framework GameController -framework QuartzCore -framework UniformTypeIdentifiers
+FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework AudioToolbox -framework GameController -framework QuartzCore -framework UniformTypeIdentifiers
 
 CPP_SRCS   := src/core/FamicomCore.cpp \
               src/core/CartridgeFaultInjector.cpp \
@@ -22,10 +22,11 @@ MM_SRCS    := src/app/main.mm \
               src/app/AppMenuController.mm \
               src/app/AppPreferences.mm \
               src/app/EmulationPacer.mm \
+              src/app/FdsDriveController.mm \
               src/app/LicensesWindow.mm \
               src/audio/MacAudioEngine.mm \
               src/video/CrtScreenView.mm \
-              src/video/CrtShaderProgram.mm \
+              src/video/CrtMetalPipeline.mm \
               src/video/StatusBanner.mm \
               src/hud/CartConnectorHud.mm \
               src/input/InputBindings.mm \
@@ -53,13 +54,13 @@ $(BUILD_DIR)/obj/%.o: src/%.mm
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(OBJCFLAGS) -c $< -o $@
 
-app: $(CORE_DYLIB) $(OBJS) resources/Info.plist resources/AppIcon.icns resources/shaders/*.glsl LICENSE
+app: $(CORE_DYLIB) $(OBJS) resources/Info.plist resources/AppIcon.icns resources/shaders/*.glsl resources/shaders/*.metal LICENSE
 	@mkdir -p "$(BUNDLE)/Contents/MacOS" "$(BUNDLE)/Contents/Frameworks" "$(BUNDLE)/Contents/Resources/shaders"
 	$(CXX) -arch $(ARCH) $(OBJCFLAGS) $(OBJS) $(FRAMEWORKS) -o "$(BIN)"
 	@cp resources/Info.plist "$(BUNDLE)/Contents/Info.plist"
 	@cp resources/AppIcon.icns "$(BUNDLE)/Contents/Resources/AppIcon.icns"
 	@cp LICENSE "$(BUNDLE)/Contents/Resources/LICENSE.txt"
-	@cp resources/shaders/*.glsl "$(BUNDLE)/Contents/Resources/shaders/"
+	@cp resources/shaders/*.glsl resources/shaders/*.metal "$(BUNDLE)/Contents/Resources/shaders/"
 	@cp "$(CORE_DYLIB)" "$(BUNDLE)/Contents/Frameworks/fceumm_libretro.dylib"
 	@install_name_tool -id "@executable_path/../Frameworks/fceumm_libretro.dylib" "$(BUNDLE)/Contents/Frameworks/fceumm_libretro.dylib"
 	@codesign --force --sign - "$(BUNDLE)/Contents/Frameworks/fceumm_libretro.dylib"

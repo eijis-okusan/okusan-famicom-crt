@@ -22,6 +22,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     NSMenuItem *_menuRf;
     NSMenuItem *_menuBwRf;
     NSMenuItem *_menuInterlaced;
+    NSMenuItem *_menuHdr;
     NSMenuItem *_menuHvBloom;
     NSMenuItem *_menuCurvature;
     NSMenuItem *_menuSlotMask;
@@ -159,6 +160,8 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     _menuInterlaced = add(app_l10n::tr(@"525本 480i インターレース (OFF = 240p)",
                                          @"525-Line 480i Interlace (Off = 240p)"),
                           @selector(toggleInterlaced:), @"i");
+    _menuHdr       = add(app_l10n::tr(@"HDR CRT ピーク強調 (EDR)", @"HDR CRT Luminance (EDR)"),
+                         @selector(toggleHdr:), @"d");
     _menuHvBloom   = add(app_l10n::tr(@"フライバック HV ブルーム", @"Flyback HV Bloom"), @selector(toggleHvBloom:), @"b");
     _menuCurvature = add(app_l10n::tr(@"ブラウン管曲率 (OFF = 平面)", @"Tube Curvature (Off = Flat)"), @selector(toggleCurvature:), @"c");
     _menuSlotMask  = add(app_l10n::tr(@"蛍光体スロットマスク", @"Phosphor Slot Mask"), @selector(toggleSlotMask:), @"k");
@@ -354,6 +357,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     _menuRf.state = (config.rfMode && !config.monochrome) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuBwRf.state = isBwMode ? NSControlStateValueOn : NSControlStateValueOff;
     _menuInterlaced.state = config.interlaced ? NSControlStateValueOn : NSControlStateValueOff;
+    _menuHdr.state = config.hdrEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     _menuHvBloom.state = (config.hvBloom > 0.1f) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuCurvature.state = (config.curvature > 0.1f) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuSlotMask.state = (config.slotMask > 0.1f && !isBwMode) ? NSControlStateValueOn : NSControlStateValueOff;

@@ -1,5 +1,5 @@
 #import "video/StatusBanner.hpp"
-#import "video/CrtShaderProgram.hpp"
+#import "video/CrtMetalPipeline.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,8 +10,13 @@ void CrtStatusBanner::show(NSString *message) {
     showTime = CFAbsoluteTimeGetCurrent();
 }
 
-void CrtStatusBanner::draw(GLsizei backW, GLsizei backH, float backingScale) {
-    if (!text || text.length == 0) return;
+void CrtStatusBanner::draw(id<MTLDevice> device,
+                           id<MTLRenderCommandEncoder> enc,
+                           const crt_mtl::CrtMetalPipelines &pipes,
+                           int backW,
+                           int backH,
+                           float backingScale) {
+    if (!device || !enc || !text || text.length == 0) return;
     const double elapsed = CFAbsoluteTimeGetCurrent() - showTime;
     if (elapsed < 0.0 || elapsed >= 2.2) return;
     const float alpha = (elapsed < 1.8) ? 1.0f : static_cast<float>(1.0 - (elapsed - 1.8) / 0.4);
@@ -54,24 +59,20 @@ void CrtStatusBanner::draw(GLsizei backW, GLsizei backH, float backingScale) {
             CGContextRelease(ctx);
         }
 
-        const bool recreate = (!tex || texW != w || texH != h);
-        crt_gl::uploadOrUpdateRgbaTexture(tex, w, h, pixels.data(), recreate);
+        crt_mtl::uploadOrUpdateRgbaTexture(device, tex, w, h, pixels.data());
         texW = w;
         texH = h;
         lastRenderedText = [text copy];
     }
 
-    crt_gl::drawOrthoTexturedQuad(tex, backW, backH,
-                                  18.0f * scale, 18.0f * scale,
-                                  static_cast<float>(texW), static_cast<float>(texH),
-                                  alpha, false);
+    crt_mtl::drawOverlayQuad(enc, pipes, tex, backW, backH,
+                             18.0f * scale, 18.0f * scale,
+                             static_cast<float>(texW), static_cast<float>(texH),
+                             alpha, true);
 }
 
-void CrtStatusBanner::destroyGL() {
-    if (tex) {
-        glDeleteTextures(1, &tex);
-        tex = 0;
-    }
+void CrtStatusBanner::destroyMetal() {
+    tex = nil;
     texW = 0;
     texH = 0;
     lastRenderedText = nil;

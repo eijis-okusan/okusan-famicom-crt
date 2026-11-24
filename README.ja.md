@@ -25,16 +25,19 @@
 
 ## 主な特徴と技術解説
 
-### 1. 2-Pass GLSL ブラウン管パイプライン＆ VSync 同期（`src/video/`, `resources/shaders/`）
+### 1. 2-Pass Metal HDR/EDR ブラウン管パイプライン＆ VSync 同期（`src/video/`, `resources/shaders/`）
 
-映像はまず **Pass 0**（[`okusan-crt-beamload.glsl`](resources/shaders/okusan-crt-beamload.glsl)）で現フレームと前フレームの Rec.601 輝度二乗値を `1×1 RGBA16F` FBO へ縮小平滑化（4 枚構成 GL テクスチャリング＋Uniform ロケーションキャッシュ使用）してカソードビーム負荷とフライバック高圧低下を推定し、続いて 3 種類の **Pass 1** シェーダのいずれかへ出力します。フレーム同期は `EmulationPacer`（`CADisplayLink` による 60 Hz 1:1 / 120 Hz ProMotion 1:2 ロック＋`NSActivityLatencyCritical` 指定）と `MacAudioEngine` 側の Dynamic Rate Control（DRC）により、スクロール時の引っかかりや音割れを抑えています。
+映像出力は `ExtendedLinearSRGB` 色空間の **Metal** `MTKView`（`MTLPixelFormatRGBA16Float`）上で [`okusan-crt.metal`](resources/shaders/okusan-crt.metal) を実行時コンパイルして描画します（参照用 GLSL も併存）。**Pass 0**（`beamloadFragment`）で現フレームと前フレームの Rec.601 輝度二乗値を `1×1 RGBA16Float` ターゲットへ縮小平滑化してカソードビーム負荷とフライバック高圧低下を推定し、続いて 3 種類の **Pass 1** シェーダのいずれかへ出力します。フレーム同期は `EmulationPacer`（`CADisplayLink` による 60 Hz 1:1 / 120 Hz ProMotion 1:2 ロック＋`NSActivityLatencyCritical` 指定）と `MacAudioEngine` 側の Dynamic Rate Control（DRC）により、スクロール時の引っかかりや音割れを抑えています。
 
-- **RGB モニター**（[`okusan-crt-display.glsl`](resources/shaders/okusan-crt-display.glsl), `Cmd + 1`）
+- **HDR CRT ピーク強調（EDR / `Cmd + D`）＆実機準拠 ABL**
+  - XDR / HDR ディスプレイ（`NSScreen.maximumExtendedDynamicRangeColorComponentValue > 1.0`）接続時、色域は昭和ブラウン管（sRGB / Rec.601 プライマリ）のまま変えずに、輝度ヘッドルームだけを拡張します。
+  - Pass 0 の `beamLoad` に連動した **ABL（自動ビームリミッタ）** により、全白フラッシュ時は電源サグで控えめに抑えつつ、夜空の星・弾・文字・ハレーション・RF インパルスノイズなどの小面積ピークだけを EDR 領域へ鋭く発光させることで、走査線やスロットマスクによる光量低下を自然に補います（SDR 環境では 1:1 の従来出力へ自動フォールバック）。
+- **RGB モニター**（`displayRgbFragment`, `Cmd + 1`）
   - くっきりした RGB 入力に対し、管面曲率・スロットマスク・480i 交互フィールド走査線／240p切替・微細な3電子銃コンバージェンスずれ・ガラス内面ハレーション・HV ブルームを適用します。
-  - **CRT ディスプレイ** メニューから **ブラウン管曲率 (OFF = 平面)**（`Cmd + C`）をオフにすることで **RGB フラット表示** も可能なほか、480i/240p（`Cmd + I`）・HV ブルーム（`Cmd + B`）・スロットマスク（`Cmd + K`）も個別に切り替えられます。
-- **カラー RF テレビ**（[`okusan-crt-rf-display.glsl`](resources/shaders/okusan-crt-rf-display.glsl), `Cmd + 2`）
+  - **CRT ディスプレイ** メニューから **ブラウン管曲率 (OFF = 平面)**（`Cmd + C`）をオフにすることで **RGB フラット表示** も可能なほか、480i/240p（`Cmd + I`）・HDR ピーク強調（`Cmd + D`）・HV ブルーム（`Cmd + B`）・スロットマスク（`Cmd + K`）も個別に切り替えられます。
+- **カラー RF テレビ**（`displayRfFragment`, `Cmd + 2`）
   - 走査線単位での NTSC YIQ コンポジット変調、300Ω 平行フィーダー線反射ゴースト（`-5 tap` / `-10 tap`）、復調前のガウシアン＋インパルス RF 砂嵐ノイズ、6タップ直交色副搬送波復調を物理ベースで計算し、色滲み・3.58 MHz クロスカラー・ドットクロール・P22 蛍光体残光を自然に発生させます。
-- **白黒 RF テレビ / P4 蛍光体**（[`okusan-crt-bw-display.glsl`](resources/shaders/okusan-crt-bw-display.glsl), `Cmd + 3`）
+- **白黒 RF テレビ / P4 蛍光体**（`displayBwFragment`, `Cmd + 3`）
   - シャドウマスク・3電子銃・I/Q 色復調を持たない **単一電子銃・銀白色 P4 蛍光体** モデルです。無濾波コンポジット検波により 3.58 MHz 色副搬送波がそのまま微細な白黒ドットクロールとして乗りつつ、RGB トライアドによるボケがないシャープな輪郭と強い HV ブルームを再現します（スロットマスク `Cmd + K` は自動無効化）。
 - **未信号・通電断の砂嵐**
   - ROM 未挿入、本体電源 OFF（`O`）、または斜め差しでカートリッジ電圧が `Vcc < 3.40 V` に落ちると、RGB モードでは黒画面、RF モードでは湾曲走査線越しの RF 砂嵐を表示します。
@@ -155,6 +158,7 @@ make distclean   # build/ と third_party/fceumm の生成物を全削除
 | `P` | 一時停止 / 再開 |
 | `F5` / `F8` | クイックセーブ / クイックロード |
 | `Cmd + 1` / `2` / `3` | RGB モニター / カラー RF / 白黒 RF テレビ切替 |
+| `Cmd + D` | HDR CRT ピーク強調（EDR / ABL）ON / OFF |
 | `Cmd + I` / `B` / `C` / `K` | 480i/240p・HV ブルーム・管面曲率・スロットマスク切替 |
 | `Cmd + M` / `Cmd + F` | ミュート / フルスクリーン切替 |
 | `Cmd + O` / `Cmd + ,` | ROM / .fds を開く / コントローラ設定ウィンドウ |
@@ -187,8 +191,8 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
    └─ CartridgeFaultInjector   (コールドブート 60ピン接触不良生成＆起動検証)
    ▼
   macOS UI・描画・音響層 (src/{app,audio,video,hud,input}/)
-   ├─ AppDelegate + AppMenuController + AppPreferences + EmulationPacer + LicensesWindow + AppLocalization
-   ├─ CrtScreenView + CrtShaderProgram + StatusBanner + FreezeFrameGenerator + GLSL シェーダ (1x1 Pass0 & CRT/RF/P4/3D)
+   ├─ AppDelegate + AppMenuController + AppPreferences + EmulationPacer + FdsDriveController + LicensesWindow + AppLocalization
+   ├─ CrtScreenView + CrtMetalPipeline + StatusBanner + FreezeFrameGenerator + Metal シェーダ (`okusan-crt.metal`, RGBA16Float EDR)
    ├─ CartConnectorHud         (1:1 mm ソケット断面図＆ライブピン監視)
    ├─ MacAudioEngine + TvSpeakerDsp.hpp (CoreAudio DRC ＋ 小口径紙コーンEQ／インターキャリアバズ)
    └─ InputBindings + InputPoller + ControllerSettingsWindow (キーボード ＋ GameController)
@@ -205,14 +209,14 @@ Apple `GameController` フレームワーク対応パッド（Xbox / PlayStation
 │   ├── 60pin-hardware-notes.md     # 60ピン物理・CPU/PPU バス連動仕様書（日本語）
 │   └── 60pin-hardware-notes.en.md  # 同仕様書（English）
 ├── resources/
-│   ├── shaders/                    # 2-pass GLSL 1.20 CRT / RF / 白黒 P4 シェーダ
+│   ├── shaders/                    # Metal 2-pass HDR/EDR シェーダ (`okusan-crt.metal`) ＋ 参照用 GLSL ソース
 │   ├── AppIcon.icns                # macOS アプリアイコン
 │   └── Info.plist                  # バンドル情報（v0.6）
 ├── src/
-│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, EmulationPacer, LicensesWindow, AppLocalization
+│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, EmulationPacer, FdsDriveController, LicensesWindow, AppLocalization
 │   ├── core/                       # FamicomCore & CartridgeFaultInjector（標準 C++17 の libretro/60ピン/3D/FDS API）
 │   ├── audio/                      # TvSpeakerDsp.hpp（標準 C++17）と MacAudioEngine（CoreAudio + DRC）
-│   ├── video/                      # FreezeFrameGenerator（標準 C++17）, CrtScreenView, CrtShaderProgram, StatusBanner
+│   ├── video/                      # FreezeFrameGenerator（標準 C++17）, CrtScreenView, CrtMetalPipeline, StatusBanner
 │   ├── hud/                        # CartConnectorHud（CoreGraphics 1:1 mm コネクタ＆解析UI）
 │   └── input/                      # InputBindings, InputPoller, ControllerSettingsWindow
 ├── third_party/

@@ -3,6 +3,7 @@
 #import "app/AppMenuController.hpp"
 #import "app/AppPreferences.hpp"
 #import "app/EmulationPacer.hpp"
+#import "app/FdsDriveController.hpp"
 #import "app/LicensesWindow.hpp"
 
 #import <Carbon/Carbon.h>
@@ -43,10 +44,10 @@
 
     NSString *_loadedRomPath;
     NSString *_pendingRomPath;
-    NSString *_activeFdsDiskPath;
     NSMutableArray<NSString *> *_recentRoms;
 
     AppMenuController *_menuController;
+    FdsDriveController *_fdsController;
     InputBindings _bindings;
     ControllerSettingsWindow *_settingsWindow;
     LicensesWindowController *_licensesController;
@@ -103,94 +104,14 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
 
 #pragma mark - ROM & FDS Disk Loading
 
-- (void)saveCurrentFdsDiskDiff {
-    if (_famicom.isLoaded() && _famicom.isFdsActive() && _activeFdsDiskPath.length > 0) {
-        _famicom.saveFdsDiskDiff(app_prefs::fdsSaveDiffPathForDisk(_activeFdsDiskPath));
-    }
-}
-
-- (BOOL)hotSwapFdsDiskPath:(NSString *)diskPath showErrorAlert:(BOOL)showAlert {
-    if (!_famicom.isLoaded() || !_famicom.isFdsActive() || !diskPath) return NO;
-    [self saveCurrentFdsDiskDiff];
-    const int sides = _famicom.hotSwapFdsDisk([diskPath UTF8String]);
-    if (sides <= 0) {
-        if (showAlert) {
-            NSAlert *alert = [[NSAlert alloc] init];
-            alert.messageText = app_l10n::tr(@"FDS ディスクを読み込めませんでした", @"Failed to Load FDS Disk");
-            alert.informativeText = diskPath;
-            [alert runModal];
-        }
-        return NO;
-    }
-    _activeFdsDiskPath = [diskPath copy];
-    _loadedRomPath = [diskPath copy];
-    app_prefs::recordRecentRomPath(_recentRoms, diskPath);
-    [_menuController rebuildHistoryMenuWithPaths:_recentRoms activePath:_loadedRomPath target:self];
-    _famicom.loadFdsDiskDiff(app_prefs::fdsSaveDiffPathForDisk(_activeFdsDiskPath));
-    [self refreshMenuStates];
-    NSString *baseName = [[diskPath lastPathComponent] stringByDeletingPathExtension];
-    [_screenView showStatusBannerText:app_l10n::tr(
-        [NSString stringWithFormat:@"ディスク挿入: %@ (%d面)", baseName, sides],
-        [NSString stringWithFormat:@"Disk Inserted: %@ (%d sides)", baseName, sides])];
-    return YES;
-}
-
-- (BOOL)loadAndPowerOnRom:(NSString *)romPath {
-    if (!romPath || ![[NSFileManager defaultManager] fileExistsAtPath:romPath]) {
-        return NO;
-    }
-
-    NSString *ext = [romPath.pathExtension lowercaseString];
-    if ([ext isEqualToString:@"fds"]) {
-        // Hot-swap cleanly onto a running FDS BIOS standby without cold resetting.
-        if (_famicom.isLoaded() && _famicom.isFdsActive()) {
-            const FdsDriveStatus fst = _famicom.fdsDriveStatus();
-            if (fst.totalSides == 0) {
-                return [self hotSwapFdsDiskPath:romPath showErrorAlert:YES];
-            }
-        }
-        const std::string biosPath = app_prefs::applicationSupportDirectory() + "/disksys.rom";
-        if (![[NSFileManager defaultManager] fileExistsAtPath:[NSString stringWithUTF8String:biosPath.c_str()]]) {
-            NSAlert *alert = [[NSAlert alloc] init];
-            alert.messageText = app_l10n::tr(
-                @"FDS BIOS (disksys.rom) が見つかりません",
-                @"FDS BIOS (disksys.rom) Not Found");
-            alert.informativeText = app_l10n::tr(
-                @"先に FDS BIOS (disksys.rom / .rom / .bin / .nes) を開くと自動登録され、そのまま .fds を入れ替えられます。",
-                @"Open your FDS BIOS file (disksys.rom / .rom / .bin / .nes) first to register it automatically, then load or drop a .fds image.");
-            [alert runModal];
-            return NO;
-        }
-    }
-
-    [self saveCurrentFdsDiskDiff];
-    _activeFdsDiskPath = nil;
-    app_prefs::cacheFdsBiosIfValid(romPath);
-
-    NSString *corePath = [[[NSBundle mainBundle] privateFrameworksPath]
-                          stringByAppendingPathComponent:@"fceumm_libretro.dylib"];
-    const std::string supportDir = app_prefs::applicationSupportDirectory();
-
-    if (!corePath || !_famicom.load([corePath UTF8String], [romPath UTF8String], supportDir, supportDir)) {
-        NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText = app_l10n::tr(@"ROM / ディスクを読み込めませんでした", @"Failed to Load ROM / Disk Image");
-        alert.informativeText = romPath;
-        [alert runModal];
-
-        [_screenView setConsolePowered:NO instant:YES];
-        _audioEngine.setConsolePowered(false);
-        [self refreshMenuStates];
-        return NO;
-    }
-
+- (void)recordLoadedRomHistory:(NSString *)romPath {
     _loadedRomPath = [romPath copy];
-    if ([ext isEqualToString:@"fds"]) {
-        _activeFdsDiskPath = [romPath copy];
-        _famicom.loadFdsDiskDiff(app_prefs::fdsSaveDiffPathForDisk(_activeFdsDiskPath));
-    }
     app_prefs::recordRecentRomPath(_recentRoms, romPath);
     [_menuController rebuildHistoryMenuWithPaths:_recentRoms activePath:_loadedRomPath target:self];
+    [self refreshMenuStates];
+}
 
+- (void)resetRuntimeStateForNewRom {
     _paused = NO;
     _frozen = NO;
     _resetHeld = NO;
@@ -210,10 +131,50 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
         const CrtDisplayConfig config = _screenView.displayConfig;
         _audioEngine.setRfTvMode(config.rfMode, config.rfSnow, config.rfSignal);
     }
+}
+
+- (BOOL)loadAndPowerOnRom:(NSString *)romPath {
+    if (!romPath || ![[NSFileManager defaultManager] fileExistsAtPath:romPath]) {
+        return NO;
+    }
+
+    __weak AppDelegate *weakSelf = self;
+    BOOL fdsHandled = NO;
+    const BOOL fdsReady = [_fdsController prepareOrHotSwapFdsPath:romPath
+                                                       handledOut:&fdsHandled
+                                                       onInserted:^(NSString *diskPath) {
+                                                           AppDelegate *strong = weakSelf;
+                                                           if (strong) [strong recordLoadedRomHistory:diskPath];
+                                                       }];
+    if (fdsHandled) {
+        return fdsReady;
+    }
+
+    [_fdsController saveActiveDiskDiff];
+    [_fdsController clearActiveDisk];
+    app_prefs::cacheFdsBiosIfValid(romPath);
+
+    NSString *corePath = [[[NSBundle mainBundle] privateFrameworksPath]
+                          stringByAppendingPathComponent:@"fceumm_libretro.dylib"];
+    const std::string supportDir = app_prefs::applicationSupportDirectory();
+    if (!corePath || !_famicom.load([corePath UTF8String], [romPath UTF8String], supportDir, supportDir)) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = app_l10n::tr(@"ROM / ディスクを読み込めませんでした", @"Failed to Load ROM / Disk Image");
+        alert.informativeText = romPath;
+        [alert runModal];
+
+        [_screenView setConsolePowered:NO instant:YES];
+        _audioEngine.setConsolePowered(false);
+        [self refreshMenuStates];
+        return NO;
+    }
+
+    [_fdsController onRomLoadedAtPath:romPath];
+    [self resetRuntimeStateForNewRom];
+    [self recordLoadedRomHistory:romPath];
 
     [_screenView setConsolePowered:YES instant:NO];
     _audioEngine.setConsolePowered(true);
-    [self refreshMenuStates];
     [_window makeKeyAndOrderFront:nil];
     return YES;
 }
@@ -275,6 +236,15 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
 - (void)selectColorRfMode:(id)sender { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = false; }]; }
 - (void)selectBwRfMode:(id)sender    { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = true;  }]; }
 - (void)toggleInterlaced:(id)sender  { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.interlaced = !c.interlaced; }]; }
+- (void)toggleHdr:(id)sender {
+    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.hdrEnabled = !c.hdrEnabled; }];
+    const float hr = _screenView.activeHdrHeadroom;
+    NSString *msg = _screenView.displayConfig.hdrEnabled
+                        ? app_l10n::tr([NSString stringWithFormat:@"HDR CRT (EDR): ON (%.1fx)", hr],
+                                       [NSString stringWithFormat:@"HDR CRT (EDR): ON (%.1fx)", hr])
+                        : app_l10n::tr(@"HDR CRT (EDR): OFF (SDR)", @"HDR CRT (EDR): OFF (SDR)");
+    [_screenView showStatusBannerText:msg];
+}
 - (void)toggleHvBloom:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.hvBloom = (c.hvBloom > 0.1f) ? 0.0f : 1.0f; }]; }
 - (void)toggleCurvature:(id)sender   { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.curvature = (c.curvature > 0.1f) ? 0.0f : 1.0f; }]; }
 - (void)toggleSlotMask:(id)sender    { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.slotMask = (c.slotMask > 0.1f) ? 0.0f : 1.0f; }]; }
@@ -360,68 +330,27 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
 
 #pragma mark - Famicom Disk System
 
-+ (NSString *)labelForFdsSide:(int)side totalSides:(int)totalSides {
-    if (totalSides <= 2) {
-        return app_l10n::tr((side == 0) ? @"A面" : @"B面", (side == 0) ? @"Side A" : @"Side B");
-    }
-    const int diskNo = 1 + (side / 2);
-    const char sideCh = (side & 1) ? 'B' : 'A';
-    return app_l10n::tr(
-        [NSString stringWithFormat:@"Disk %d %c面", diskNo, sideCh],
-        [NSString stringWithFormat:@"Disk %d Side %c", diskNo, sideCh]);
-}
-
 - (void)openFdsHotSwapDialog:(id)sender {
     (void)sender;
-    if (!_famicom.isLoaded() || !_famicom.isFdsActive()) return;
-    NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.canChooseFiles = YES;
-    panel.canChooseDirectories = NO;
-    panel.allowsMultipleSelection = NO;
-    if (@available(macOS 11.0, *)) {
-        UTType *fdsType = [UTType typeWithFilenameExtension:@"fds"];
-        if (fdsType) panel.allowedContentTypes = @[fdsType];
-    }
-    if ([panel runModal] == NSModalResponseOK && panel.URL.isFileURL) {
-        [self hotSwapFdsDiskPath:panel.URL.path showErrorAlert:YES];
-    }
+    __weak AppDelegate *weakSelf = self;
+    [_fdsController openHotSwapDialogWithOnInserted:^(NSString *diskPath) {
+        AppDelegate *strong = weakSelf;
+        if (strong) [strong recordLoadedRomHistory:diskPath];
+    }];
 }
 
 - (void)flipFdsDisk:(id)sender {
     (void)sender;
-    if (!_famicom.isLoaded() || !_famicom.isFdsActive()) return;
-    const FdsDriveStatus fst = _famicom.fdsDriveStatus();
-    if (fst.insertedSide < 0 || fst.totalSides < 2) return;
-    int nextSide = (fst.insertedSide ^ 1);
-    if (nextSide >= fst.totalSides) nextSide = (fst.insertedSide + 1) % fst.totalSides;
-    _famicom.setFdsDiskSide(nextSide);
-    [self refreshMenuStates];
-    NSString *lbl = [AppDelegate labelForFdsSide:nextSide totalSides:fst.totalSides];
-    [_screenView showStatusBannerText:app_l10n::tr(
-        [NSString stringWithFormat:@"ディスク裏返し: %@", lbl],
-        [NSString stringWithFormat:@"Flipped Disk: %@", lbl])];
+    if ([_fdsController flipDiskSide]) [self refreshMenuStates];
 }
 
 - (void)ejectFdsDisk:(id)sender {
     (void)sender;
-    if (!_famicom.isLoaded() || !_famicom.isFdsActive()) return;
-    const FdsDriveStatus fst = _famicom.fdsDriveStatus();
-    if (fst.insertedSide < 0) return;
-    _famicom.ejectFdsDisk();
-    [self refreshMenuStates];
-    [_screenView showStatusBannerText:app_l10n::tr(@"ディスクを抜きました", @"Disk Ejected")];
+    if ([_fdsController ejectDisk]) [self refreshMenuStates];
 }
 
 - (void)insertFdsSide:(int)side {
-    if (!_famicom.isLoaded() || !_famicom.isFdsActive()) return;
-    const FdsDriveStatus fst = _famicom.fdsDriveStatus();
-    if (fst.insertedSide >= 0 || side < 0 || side >= fst.totalSides) return;
-    _famicom.setFdsDiskSide(side);
-    [self refreshMenuStates];
-    NSString *lbl = [AppDelegate labelForFdsSide:side totalSides:fst.totalSides];
-    [_screenView showStatusBannerText:app_l10n::tr(
-        [NSString stringWithFormat:@"ディスク挿入: %@", lbl],
-        [NSString stringWithFormat:@"Inserted: %@", lbl])];
+    if ([_fdsController insertSide:side]) [self refreshMenuStates];
 }
 
 - (void)insertFdsSideFromMenu:(NSMenuItem *)sender {
@@ -430,15 +359,7 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
 
 - (void)triggerFdsRandomFault:(id)sender {
     (void)sender;
-    if (!_famicom.isLoaded() || !_famicom.isFdsActive()) return;
-    const FdsDriveStatus fst = _famicom.fdsDriveStatus();
-    if (fst.totalSides <= 0) return;
-    if (_famicom.triggerRandomFdsFault() > 0) {
-        [self refreshMenuStates];
-        [_screenView showStatusBannerText:app_l10n::tr(
-            @"FDS: 読込エラー再現 (ランダム故障)",
-            @"FDS: Simulated Read Error (Random Fault)")];
-    }
+    if ([_fdsController triggerRandomFault]) [self refreshMenuStates];
 }
 
 - (void)toggleFreeze:(id)sender {
@@ -799,6 +720,7 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
     _screenView.screenDelegate = self;
     _window.contentView = _screenView;
     [_window makeFirstResponder:_screenView];
+    _fdsController = [[FdsDriveController alloc] initWithCore:&_famicom screenView:_screenView];
 
     [self loadUserPreferences];
     [self rebuildMenuBar];
@@ -844,7 +766,7 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
-    [self saveCurrentFdsDiskDiff];
+    [_fdsController saveActiveDiskDiff];
     [_pacer stop];
     _pacer = nil;
     _audioEngine.stop();

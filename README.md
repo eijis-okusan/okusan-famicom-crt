@@ -25,16 +25,19 @@ A standalone Famicom / NES player for macOS that pairs a **1980s 14-inch CRT tel
 
 ## Key Features & Technical Architecture
 
-### 1. Two-Pass GLSL CRT Display & VSync Pipeline (`src/video/`, `resources/shaders/`)
+### 1. Two-Pass Metal HDR/EDR CRT Display & VSync Pipeline (`src/video/`, `resources/shaders/`)
 
-All video output passes through **Pass 0** ([`okusan-crt-beamload.glsl`](resources/shaders/okusan-crt-beamload.glsl)), which downsamples squared Rec.601 luminance across the current and previous frames into a `1×1 RGBA16F` target (fed from a 4-slot GL texture ring with cached GLSL uniform locations) to estimate cathode beam load and flyback high-voltage sag, followed by one of three **Pass 1** display shaders. Frame cadence is driven by `EmulationPacer` (`CADisplayLink` locked 1:1 on 60 Hz / 1:2 on 120 Hz ProMotion displays with an `NSActivityLatencyCritical` assertion) paired with smooth Dynamic Rate Control (`MacAudioEngine`) for tear- and stutter-free scrolling:
+Video rendering runs on a **Metal** `MTKView` (`MTLPixelFormatRGBA16Float` in `ExtendedLinearSRGB`) compiled at runtime from [`okusan-crt.metal`](resources/shaders/okusan-crt.metal) (with GLSL reference shaders retained alongside). **Pass 0** (`beamloadFragment`) downsamples squared Rec.601 luminance across the current and previous frames into a `1×1 RGBA16Float` target (fed from a 4-slot texture ring) to estimate cathode beam load and flyback high-voltage sag, followed by one of three **Pass 1** display shaders. Frame cadence is driven by `EmulationPacer` (`CADisplayLink` locked 1:1 on 60 Hz / 1:2 on 120 Hz ProMotion displays with an `NSActivityLatencyCritical` assertion) paired with smooth Dynamic Rate Control (`MacAudioEngine`) for tear- and stutter-free scrolling:
 
-- **RGB Monitor** ([`okusan-crt-display.glsl`](resources/shaders/okusan-crt-display.glsl), `Cmd + 1`)
+- **HDR / EDR CRT Luminance & Physical ABL (`Cmd + D`)**
+  - On HDR / XDR displays (`NSScreen.maximumExtendedDynamicRangeColorComponentValue > 1.0`), `CrtScreenView` unlocks macOS Extended Dynamic Range luminance within standard Rec.601/sRGB phosphor primaries (without distorting vintage colors into wide gamut).
+  - Using Pass 0's `beamLoad`, an **Automatic Beam Limiter (ABL)** model expands localized highlights, scanline cores, phosphor slot peaks, glass halation, and RF impulse static into EDR headroom while gently sagging full-screen white flashes—compensating for scanline/slot-mask light loss and falling back seamlessly to 1:1 SDR on non-HDR displays.
+- **RGB Monitor** (`displayRgbFragment`, `Cmd + 1`)
   - Clean RGB signal with barrel tube curvature, aperture slot mask, NTSC 480i alternating-field interlace or 240p scanlines, subtle RGB gun convergence offset, glass halation, and HV bloom.
-  - Under the **CRT Display** menu, you can also flatten the tube (`Tube Curvature (Off = Flat)`, `Cmd + C`) and toggle scanline interlace (`Cmd + I`), HV bloom (`Cmd + B`), or slot mask (`Cmd + K`) to dial in a razor-sharp **flat RGB CRT** look.
-- **Color RF Television** ([`okusan-crt-rf-display.glsl`](resources/shaders/okusan-crt-rf-display.glsl), `Cmd + 2`)
+  - Under the **CRT Display** menu, you can also flatten the tube (`Tube Curvature (Off = Flat)`, `Cmd + C`) and toggle scanline interlace (`Cmd + I`), HDR luminance (`Cmd + D`), HV bloom (`Cmd + B`), or slot mask (`Cmd + K`) to dial in a razor-sharp **flat RGB CRT** look.
+- **Color RF Television** (`displayRfFragment`, `Cmd + 2`)
   - Models NTSC YIQ composite encoding along each scanline, 300-ohm twin-lead reflection ghosts (`-5 tap` and `-10 tap`), pre-demodulation Gaussian + impulse RF snow noise, and 6-tap orthogonal subcarrier demodulation—naturally producing chroma bleed, 3.58 MHz cross-color shimmer on fine patterns, dot crawl, and P22 phosphor decay.
-- **B&W RF Television** ([`okusan-crt-bw-display.glsl`](resources/shaders/okusan-crt-bw-display.glsl), `Cmd + 3`)
+- **B&W RF Television** (`displayBwFragment`, `Cmd + 3`)
   - Single-electron-gun **P4 silver-white phosphor** CRT with zero RGB triads, zero convergence error, and zero chroma decoder. Unfiltered composite video detection beats the 3.58 MHz chroma subcarrier directly into luminance as authentic monochrome dot crawl while keeping luminance edges crisp. Slot mask (`Cmd + K`) is automatically disabled in this mode.
 - **Standby & Brownout RF Snow**
   - When no ROM is loaded, the Famicom power switch (`O`) is off, or tilted cartridge resistance drops rail `Vcc < 3.40 V`, RGB mode cuts to black while RF modes display animated white-noise static on the curved 480i raster.
@@ -156,6 +159,7 @@ make distclean   # Remove build/ and clean third_party/fceumm objects
 | `P` | Pause / resume emulation |
 | `F5` / `F8` | Quick Save / Quick Load |
 | `Cmd + 1` / `2` / `3` | RGB Monitor / Color RF / B&W RF Television |
+| `Cmd + D` | Toggle HDR CRT Luminance / Physical ABL (EDR) |
 | `Cmd + I` / `B` / `C` / `K` | Toggle 480i/240p / HV Bloom / Curvature / Slot Mask |
 | `Cmd + M` / `Cmd + F` | Mute Audio / Toggle Full Screen |
 | `Cmd + O` / `Cmd + ,` | Open ROM / FDS... / Controller Settings Window |
@@ -188,8 +192,8 @@ The UI automatically matches your macOS system language on launch, and can be sw
    └─ CartridgeFaultInjector   (cold-boot 60-pin fault synthesizer & boot prober)
    ▼
   macOS Presentation Layer (src/{app,audio,video,hud,input}/)
-   ├─ AppDelegate + AppMenuController + AppPreferences + EmulationPacer + LicensesWindow + AppLocalization
-   ├─ CrtScreenView + CrtShaderProgram + StatusBanner + FreezeFrameGenerator + GLSL Shaders (1x1 Pass 0 & CRT/RF/P4/3D)
+   ├─ AppDelegate + AppMenuController + AppPreferences + EmulationPacer + FdsDriveController + LicensesWindow + AppLocalization
+   ├─ CrtScreenView + CrtMetalPipeline + StatusBanner + FreezeFrameGenerator + Metal Shaders (`okusan-crt.metal`, RGBA16Float EDR)
    ├─ CartConnectorHud         (1:1 mm socket cutaway & live pin bus inspector)
    ├─ MacAudioEngine + TvSpeakerDsp.hpp (CoreAudio DRC + paper-cone EQ / intercarrier buzz)
    └─ InputBindings + InputPoller + ControllerSettingsWindow (keyboard + GameController)
@@ -206,14 +210,14 @@ The UI automatically matches your macOS system language on launch, and can be sw
 │   ├── 60pin-hardware-notes.en.md  # Detailed 60-pin physical & bus spec (English)
 │   └── 60pin-hardware-notes.md     # Detailed 60-pin physical & bus spec (Japanese)
 ├── resources/
-│   ├── shaders/                    # 2-pass GLSL 1.20 CRT/RF/B&W shaders
+│   ├── shaders/                    # Metal 2-pass HDR/EDR shader (`okusan-crt.metal`) + GLSL reference sources
 │   ├── AppIcon.icns                # macOS app icon
 │   └── Info.plist                  # Bundle metadata (v0.6)
 ├── src/
-│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, EmulationPacer, LicensesWindow, AppLocalization
+│   ├── app/                        # main, AppDelegate, AppMenuController, AppPreferences, EmulationPacer, FdsDriveController, LicensesWindow, AppLocalization
 │   ├── core/                       # FamicomCore & CartridgeFaultInjector (pure C++17 libretro/60-pin/3D/FDS API)
 │   ├── audio/                      # TvSpeakerDsp.hpp (pure C++17) & MacAudioEngine (CoreAudio + DRC)
-│   ├── video/                      # FreezeFrameGenerator (pure C++17), CrtScreenView, CrtShaderProgram, StatusBanner
+│   ├── video/                      # FreezeFrameGenerator (pure C++17), CrtScreenView, CrtMetalPipeline, StatusBanner
 │   ├── hud/                        # CartConnectorHud (CoreGraphics 1:1 mm connector & inspector)
 │   └── input/                      # InputBindings, InputPoller, ControllerSettingsWindow
 ├── third_party/

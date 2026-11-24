@@ -82,6 +82,7 @@ void loadDisplayPreferences(CrtDisplayConfig &config, bool &outMuted, bool &outI
     if ([defaults objectForKey:@"useRf"])        config.rfMode = [defaults boolForKey:@"useRf"];
     if ([defaults objectForKey:@"monochrome"])   config.monochrome = [defaults boolForKey:@"monochrome"];
     if ([defaults objectForKey:@"interlaced"])   config.interlaced = [defaults boolForKey:@"interlaced"];
+    if ([defaults objectForKey:@"hdrEnabled"])   config.hdrEnabled = [defaults boolForKey:@"hdrEnabled"];
     if ([defaults objectForKey:@"hvBloom"])      config.hvBloom = [defaults floatForKey:@"hvBloom"];
     if ([defaults objectForKey:@"curvature"])    config.curvature = [defaults floatForKey:@"curvature"];
     if ([defaults objectForKey:@"maskStrength"]) config.slotMask = [defaults floatForKey:@"maskStrength"];
@@ -97,6 +98,7 @@ void saveDisplayPreferences(const CrtDisplayConfig &config, bool muted, bool inv
     [defaults setBool:config.rfMode forKey:@"useRf"];
     [defaults setBool:config.monochrome forKey:@"monochrome"];
     [defaults setBool:config.interlaced forKey:@"interlaced"];
+    [defaults setBool:config.hdrEnabled forKey:@"hdrEnabled"];
     [defaults setFloat:config.hvBloom forKey:@"hvBloom"];
     [defaults setFloat:config.curvature forKey:@"curvature"];
     [defaults setFloat:config.slotMask forKey:@"maskStrength"];
@@ -109,7 +111,7 @@ void saveDisplayPreferences(const CrtDisplayConfig &config, bool muted, bool inv
 void clearDisplayPreferences() {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSArray<NSString *> *keys = @[
-        @"useRf", @"monochrome", @"interlaced",
+        @"useRf", @"monochrome", @"interlaced", @"hdrEnabled",
         @"hvBloom", @"curvature", @"maskStrength",
         @"rfSnow", @"rfSignal", @"muted",
         @"view3dMode", @"invert3dEyes"

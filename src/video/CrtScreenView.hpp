@@ -1,6 +1,7 @@
 #pragma once
 
 #import <Cocoa/Cocoa.h>
+#import <MetalKit/MetalKit.h>
 #include <cstdint>
 #include "audio/MacAudioEngine.hpp"
 
@@ -13,6 +14,7 @@ struct CrtDisplayConfig {
     bool rfMode = true;        // false = RGB Monitor, true = VHF RF Television
     bool monochrome = false;   // true (when rfMode) = 1970s P4 B&W RF television
     bool interlaced = true;    // true = 480i scanlines, false = 240p
+    bool hdrEnabled = true;    // true = unlock macOS EDR headroom + CRT ABL physics
     float hvBloom = 1.0f;      // Flyback high-voltage bloom strength (0.0 .. 2.0)
     float curvature = 1.0f;    // CRT glass barrel curvature (0.0 .. 1.5)
     float slotMask = 1.0f;     // Shadow/slot mask intensity (0.0 .. 1.5)
@@ -34,15 +36,16 @@ enum class Famicom3dViewMode : int {
 @end
 
 /**
- * OpenGL CRT view executing a 2-pass beam-load + NTSC/RF shader pipeline,
+ * Metal CRT view executing a 2-pass beam-load + NTSC/RF/HDR-EDR shader pipeline,
  * Famicom 3D System SBS/shutter views, standby tuner snow, and the
  * interactive 60-pin cartridge connector HUD.
  */
-@interface CrtScreenView : NSOpenGLView
+@interface CrtScreenView : MTKView
 
 @property (nonatomic, weak) id<CrtScreenDelegate> screenDelegate;
 @property (nonatomic, assign) CrtDisplayConfig displayConfig;
 @property (nonatomic, readonly) BOOL consolePowered;
+@property (nonatomic, readonly) float activeHdrHeadroom;
 @property (nonatomic, assign) Famicom3dViewMode view3dMode;
 @property (nonatomic, assign) BOOL invert3dEyes;
 
