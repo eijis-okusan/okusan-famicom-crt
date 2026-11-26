@@ -39,7 +39,7 @@ Video rendering runs on a **Metal** `MTKView` (`MTLPixelFormatRGBA16Float` in `E
   - Models NTSC YIQ composite encoding along each scanline, 300-ohm twin-lead reflection ghosts (`-5 tap` and `-10 tap`), pre-demodulation Gaussian + impulse RF snow noise, and 6-tap orthogonal subcarrier demodulation—naturally producing chroma bleed, 3.58 MHz cross-color shimmer on fine patterns, dot crawl, and P22 phosphor decay.
 - **B&W RF Television** (`displayBwFragment`, `Cmd + 3`)
   - Single-electron-gun **P4 silver-white phosphor** CRT with zero RGB triads, zero convergence error, and zero chroma decoder. Unfiltered composite video detection beats the 3.58 MHz chroma subcarrier directly into luminance as authentic monochrome dot crawl while keeping luminance edges crisp. Slot mask (`Cmd + K`) is automatically disabled in this mode.
-- **CZ-612D 31kHz (X68000 RGB Monitor)** (`displayX68k31kFragment`, `Cmd + 6`)
+- **CZ-612D 31.5kHz (X68000 RGB Monitor)** (`displayX68k31kFragment`, `Cmd + 6`)
   - Physically models Sharp's **CZ-612D / CZ-614D** 31.5 kHz multisync PC/AV monitor: 480-line progressive line-doubled raster (every 60 Hz frame, zero 30 Hz interlace shimmer), a fine **0.31 mm delta dot-trio** phosphor sheen whose RGB subpixels stay unobtrusive, crisp dot-by-dot horizontal & vertical pixel edges (`sigma = 0.16`) with near-zero convergence drift, glossy smoked FST glass optics (Fresnel sheen, bevel rim glint, wide faceplate halation), regulated flyback HV, and ~9300K Japanese workstation CRT white balance.
 - **Standby & Brownout RF Snow**
   - When no ROM is loaded, the Famicom power switch (`O`) is off, or tilted cartridge resistance drops rail `Vcc < 3.40 V`, RGB mode cuts to black while RF modes display animated white-noise static on the curved 480i raster.
@@ -160,7 +160,7 @@ make distclean   # Remove build/ and clean third_party/fceumm objects
 | `C` / `E` / `1–4` / `T` | FDS Disk: Flip side / Eject / Insert Side 1–4 / Inject random read error |
 | `P` | Pause / resume emulation |
 | `F5` / `F8` | Quick Save / Quick Load |
-| `Cmd + 1` / `2` / `3` / `6` | 15kHz RGB / Color RF / B&W RF / CZ-612D 31kHz Monitor |
+| `Cmd + 1` / `2` / `3` / `6` | 15kHz RGB / Color RF / B&W RF / CZ-612D 31.5kHz Monitor |
 | `Cmd + 4` / `5` | Preset: RGB + Flat / Preset: RF + Curved & Noise |
 | `Cmd + D` | Toggle HDR CRT Luminance / Physical ABL (EDR) |
 | `Cmd + I` / `B` / `C` / `K` | Toggle 480i/240p / HV Bloom / Curvature / Slot Mask |

@@ -237,7 +237,7 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
 - (void)selectBwRfMode:(id)sender    { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = true;  c.x68k31kMode = false; }]; }
 - (void)selectX68k31kMode:(id)sender {
     [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = false; c.monochrome = false; c.x68k31kMode = true; }];
-    [_screenView showStatusBannerText:app_l10n::tr(@"CZ-612D 31kHz", @"CZ-612D 31kHz")];
+    [_screenView showStatusBannerText:app_l10n::tr(@"CZ-612D 31.5kHz", @"CZ-612D 31.5kHz")];
 }
 - (void)selectPresetRgbFlat:(id)sender {
     [self applyDisplayConfig:^(CrtDisplayConfig &c) { c = CrtDisplayConfig::rgbFlatPreset(c); }];
