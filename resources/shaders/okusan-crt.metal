@@ -731,30 +731,32 @@ fragment float4 displayBwFragment(FullscreenOut in [[stage_in]],
 
 // ---------- Pass 1D: Sharp X68000 CZ-612D / CZ-614D 31.5 kHz RGB Monitor ----------
 // Physically models a Japanese late-80s/early-90s 31.5 kHz multisync PC/AV CRT:
-// - 480-line progressive line-doubled scan (every 60 Hz frame, zero 30 Hz interlace flicker)
-// - Hexagonal delta-staggered 0.31 mm circular dot-trio shadow mask (distinct from TV slot masks)
-// - Tighter horizontal gun focus (sigma 0.44), minimal convergence offset, regulated HV (0.008)
-// - Dark-tinted low-curvature FST glass with minimal scatter and ~9300K Japanese CRT white balance
+// - Crisp 480-line progressive line-doubled raster (60 Hz non-interlaced, razor-clean pixel edges)
+// - Ultra-fine 0.31 mm delta dot-trio shadow mask so RGB subpixels recede into a smooth phosphor sheen
+// - Tight horizontal & vertical beam aperture (sigmaX 0.25), near-zero convergence drift, regulated HV (0.008)
+// - Smoked FST CRT glass curvature, subtle glass halation/bloom, and ~9300K Japanese CRT white balance
 
-inline float3 synthesize31kProgressiveLines(float3 rowA, float3 rowB, float fracY, float2 signal, float tvLineDeriv) {
-    // At 31.5 kHz, 240p input is line-doubled onto 480 progressive beam sweeps per 60 Hz frame.
-    float3 picture = mix(rowA, rowB, fracY * 0.65f);
-    float tvLine = (signal.y * 0.5f + 0.5f) * kNtscVisibleLines;
-    float distToLine = abs(fract(tvLine + 0.5f) - 0.5f);
+inline float3 synthesize31kProgressiveLines(float3 rowA, float3 rowB, float fracY, float2 p) {
+    // Keep vertical texel boundaries crisp across the doubled 31.5 kHz scan without muddy linear blur.
+    float edgeMix = smoothstep(0.36f, 0.64f, fracY);
+    float3 picture = mix(rowA, rowB, edgeMix);
+
+    // Phase-lock 480 progressive 31.5 kHz raster lines cleanly at k-0.25 and k+0.25 inside each source row.
+    float lineCoord = (p.y + 0.25f) * 2.0f;
+    float distToLine = abs(fract(lineCoord + 0.5f) - 0.5f);
     float peakLum = max(picture.r, max(picture.g, picture.b));
-    float spotSigma = mix(0.28f, 0.43f, sqrt(peakLum));
+    float spotSigma = mix(0.24f, 0.37f, sqrt(peakLum));
     float lineEnergy = exp(-0.5f * (distToLine * distToLine) / (spotSigma * spotSigma));
 
-    // Preserve a sharp 31 kHz dark line structure without dimming overall light output.
-    float scanGain = 0.68f + 0.48f * lineEnergy;
-    float pxPer31kLine = 1.0f / max(tvLineDeriv, 0.001f);
-    return picture * mix(0.92f, scanGain, smoothstep(1.35f, 3.0f, pxPer31kLine));
+    float scanGain = 0.66f + 0.46f * lineEnergy;
+    float pxPer31kLine = 1.0f / max(abs(dfdy(lineCoord)), 0.001f);
+    return picture * mix(0.95f, scanGain, smoothstep(1.30f, 2.25f, pxPer31kLine));
 }
 
 inline float3 applyDeltaDotTrioMask(float3 rgb, float2 screenPx, float viewWidth, float srcWidth, float maskStrength, float hdrFactor) {
-    // Delta hexagonal dot triad approximating 0.31 mm phosphor dots on a 15-inch X68000 monitor.
-    float pitchX = clamp(viewWidth / max(srcWidth * 1.48f, 1.0f), 3.0f, 5.5f);
-    float pitchY = pitchX * 0.8660254f; // cos(30 deg) equilateral triad vertical pitch
+    // High-density 0.31 mm delta triad pitch (~2.55 triads per source pixel): fine phosphor grain without loud RGB dots.
+    float pitchX = clamp(viewWidth / max(srcWidth * 2.55f, 1.0f), 2.1f, 3.1f);
+    float pitchY = pitchX * 0.8660254f;
     float rowIdx = floor(screenPx.y / pitchY);
     float u = fract(screenPx.x / pitchX + 0.5f * glsl_mod(rowIdx, 2.0f));
     float v = fract(screenPx.y / pitchY) - 0.5f;
@@ -762,11 +764,11 @@ inline float3 applyDeltaDotTrioMask(float3 rgb, float2 screenPx, float viewWidth
     float3 dx = abs(fract(u - float3(0.0f, 0.3333f, 0.6667f) + 0.5f) - 0.5f);
     float3 dy = float3(v * (pitchY / pitchX));
     float3 dotDist = sqrt(dx * dx + dy * dy);
-    float3 dots = 1.0f - smoothstep(float3(0.14f), float3(0.32f), dotDist);
+    float3 dots = 1.0f - smoothstep(float3(0.08f), float3(0.44f), dotDist);
 
-    float strength = mix(0.60f, 1.0f, smoothstep(380.0f, 780.0f, viewWidth)) * maskStrength;
-    float floorLift = mix(0.66f, 0.48f, saturate(hdrFactor * 0.45f));
-    float peakSpan = mix(0.56f, 0.84f, saturate(hdrFactor * 0.45f));
+    float strength = mix(0.42f, 0.82f, smoothstep(420.0f, 960.0f, viewWidth)) * maskStrength;
+    float floorLift = mix(0.87f, 0.80f, saturate(hdrFactor * 0.45f));
+    float peakSpan = mix(0.20f, 0.30f, saturate(hdrFactor * 0.45f));
     return rgb * mix(float3(1.0f), floorLift + peakSpan * dots, clamp(strength, 0.0f, 1.0f));
 }
 
@@ -781,36 +783,36 @@ fragment float4 displayX68k31kFragment(FullscreenOut in [[stage_in]],
     float loadExcess = max(beamLoad - kBeamLoadKnee, 0.0f) * u.hvBloom;
     float phase = glsl_mod(float(u.frameCount), 4096.0f) / 59.94f;
 
-    // CZ-612D / CZ-614D FST tube has milder curvature and tighter PC-grade HV regulation.
-    CrtRasterGeometry geom = computeCrtRasterGeometry(in.texCoord, imgSz, u.curvature * 0.55f, loadExcess, 0.008f);
-    float3 glass = float3(0.007f, 0.009f, 0.012f);
+    // CZ-612D / CZ-614D smoked FST CRT curve with tight PC-grade HV regulation.
+    CrtRasterGeometry geom = computeCrtRasterGeometry(in.texCoord, imgSz, u.curvature * 0.72f, loadExcess, 0.008f);
+    float3 glass = float3(0.008f, 0.010f, 0.013f);
     if (geom.outsideBezel) {
         return float4(srgbToLinear(glass * 0.50f), 1.0f);
     }
 
     float y = floor(geom.p.y);
     float fracY = fract(geom.p.y);
-    const float3 kX68kConv = float3(-0.045f, 0.0f, 0.055f);
-    float3 rowA = sampleHorizontalBeamCustom(origTex, geom.p, y, imgSz, texSz, 0.44f, kX68kConv);
-    float3 rowB = sampleHorizontalBeamCustom(origTex, geom.p, y + 1.0f, imgSz, texSz, 0.44f, kX68kConv);
-    float3 picture = mix(rowA, rowB, fracY);
+    const float3 kX68kConv = float3(-0.012f, 0.0f, 0.015f);
+    float3 rowA = sampleHorizontalBeamCustom(origTex, geom.p, y, imgSz, texSz, 0.25f, kX68kConv);
+    float3 rowB = sampleHorizontalBeamCustom(origTex, geom.p, y + 1.0f, imgSz, texSz, 0.25f, kX68kConv);
+    float3 picture = mix(rowA, rowB, smoothstep(0.36f, 0.64f, fracY));
 
-    float3 rgb = synthesize31kProgressiveLines(rowA, rowB, fracY, geom.signal, geom.tvLineDeriv);
+    float3 rgb = synthesize31kProgressiveLines(rowA, rowB, fracY, geom.p);
 
     float2 q = floor(geom.p + 0.5f);
     float3 previous = sampleLinearPixel(prevTex, q, imgSz, texSz, kSrcGamma);
     rgb += max(previous - picture, 0.0f) * float3(0.032f, 0.062f, 0.046f);
-    rgb = applyGlassHalationCustom(origTex, rgb, geom.p, loadExcess, imgSz, texSz, 1.08f, 0.018f, 0.014f);
+    rgb = applyGlassHalationCustom(origTex, rgb, geom.p, loadExcess, imgSz, texSz, 1.03f, 0.024f, 0.020f);
 
     float viewWidth = (u.outputSize.x > 1.0f) ? u.outputSize.x : (1.0f / max(abs(dfdx(in.texCoord.x)), 0.0001f));
     float hdrFactor = max(clamp(u.hdrHeadroom, 1.0f, 3.5f) - 1.0f, 0.0f) * clamp(u.hdrBoost, 0.0f, 1.5f);
     rgb = applyDeltaDotTrioMask(rgb, in.position.xy, viewWidth, imgSz.x, u.maskStrength, hdrFactor);
 
-    // 9300K Japanese X68000 monitor white balance + gentle anti-glare vignette.
+    // 9300K Japanese X68000 monitor white balance + subtle CRT edge falloff & glass reflection.
     const float3 k9300kBalance = float3(0.95f, 0.98f, 1.04f);
-    float vignette = 1.0f - 0.14f * smoothstep(0.35f, 1.95f, dot(geom.face, geom.face));
+    float vignette = 1.0f - 0.17f * smoothstep(0.30f, 1.90f, dot(geom.face, geom.face));
     float noise = fract(sin(dot(fmod(in.position.xy, 317.0f), float2(12.9898f, 78.233f)) + phase * 17.0f) * 43758.5453f) - 0.5f;
 
     return finalizeCrtPixel(rgb * k9300kBalance * vignette, beamLoad, geom.aperture, geom.raster, glass,
-                            geom.reflection * 0.55f, geom.lip, noise * 0.005f, u.hdrHeadroom, u.hdrBoost);
+                            geom.reflection * 0.70f, geom.lip, noise * 0.005f, u.hdrHeadroom, u.hdrBoost);
 }
