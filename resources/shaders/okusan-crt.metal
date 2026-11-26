@@ -731,33 +731,82 @@ fragment float4 displayBwFragment(FullscreenOut in [[stage_in]],
                             glass, geom.reflection, geom.lip, 0.0f, u.hdrHeadroom, u.hdrBoost);
 }
 
-// ---------- Pass 1D: Sharp X68000 CZ-612D / CZ-614D 31.5 kHz RGB Monitor ----------
-// Physically models a Japanese late-80s/early-90s 31.5 kHz multisync PC/AV CRT:
-// - Crisp dot-by-dot 480-line progressive line-doubled raster (60 Hz non-interlaced)
-// - Ultra-fine 0.31 mm delta dot-trio shadow mask so RGB subpixels stay unobtrusive
-// - Wideband horizontal & vertical beam focus (sigmaX 0.16), near-zero convergence drift, regulated HV (0.008)
-// - Polished smoked FST curved glass reflection, Fresnel bevel glint, wide glass halation, and ~9300K balance
+// ---------- Pass 1D: Sharp X68000 CZ-612D 31.5 kHz RGB Monitor ----------
+// Models the entire CZ-612D-BK desktop monitor physically recessed inside the window:
+// - Matte titanium-black ABS chassis, lower control flap recess seam, emerald power LED, and 45-degree
+//   sculpted inner bezel walls illuminated subtly by real-time screen phosphor bounce
+// - Deep recessed curved smoked FST CRT glass with 3D surface normals, room/window Fresnel reflection,
+//   overhang bezel shadow, thick-glass edge bevel glint, and dark smoked underscan frame
+// - Dot-by-dot wideband sampling locked to screen pixel scale (fwidth), 480-line 31.5 kHz progressive
+//   line-doubled scanlines, ultra-fine 0.31 mm delta shadow mask, wide faceplate halation, and ~9300K balance
 
-inline float3 synthesize31kProgressiveLines(float3 rowA, float3 rowB, float fracY, float2 p) {
-    // Razor-sharp vertical texel edges with only hairline anti-aliasing right on texel boundaries.
-    float edgeMix = smoothstep(0.43f, 0.57f, fracY);
-    float3 picture = mix(rowA, rowB, edgeMix);
+inline float roundedFrameDistance(float2 p, float2 halfSize, float radius) {
+    float2 d = abs(p) - (halfSize - radius);
+    return length(max(d, 0.0f)) + min(max(d.x, d.y), 0.0f) - radius;
+}
 
+inline float2 roundedFrameGrad(float2 p, float2 halfSize, float radius) {
+    float2 q = abs(p) - (halfSize - radius);
+    float2 g = (q.x > 0.0f || q.y > 0.0f)
+             ? normalize(max(q, 0.0f))
+             : ((q.x > q.y) ? float2(1.0f, 0.0f) : float2(0.0f, 1.0f));
+    return g * sign(p);
+}
+
+inline float3 sampleCrispLinearDot(texture2d<float> origTex,
+                                   float2 p,
+                                   float2 imgSz,
+                                   float2 texSz,
+                                   float2 fwidthP,
+                                   float3 gunConv) {
+    float wx = clamp(fwidthP.x * 0.90f, 0.04f, 0.35f);
+    float wy = clamp(fwidthP.y * 0.90f, 0.04f, 0.35f);
+
+    float x0 = floor(p.x);
+    float y0 = floor(p.y);
+    float fx = smoothstep(0.5f - wx, 0.5f + wx, fract(p.x));
+    float fy = smoothstep(0.5f - wy, 0.5f + wy, fract(p.y));
+
+    float3 s00 = sampleLinearPixel(origTex, float2(x0,        y0),        imgSz, texSz, kSrcGamma);
+    float3 s10 = sampleLinearPixel(origTex, float2(x0 + 1.0f, y0),        imgSz, texSz, kSrcGamma);
+    float3 s01 = sampleLinearPixel(origTex, float2(x0,        y0 + 1.0f), imgSz, texSz, kSrcGamma);
+    float3 s11 = sampleLinearPixel(origTex, float2(x0 + 1.0f, y0 + 1.0f), imgSz, texSz, kSrcGamma);
+    float3 dotCol = mix(mix(s00, s10, fx), mix(s01, s11, fx), fy);
+
+    if (max(abs(gunConv.r), abs(gunConv.b)) > 0.0005f) {
+        float x0r = floor(p.x + gunConv.r);
+        float fxr = smoothstep(0.5f - wx, 0.5f + wx, fract(p.x + gunConv.r));
+        float rTop = mix(sampleLinearPixel(origTex, float2(x0r,        y0),        imgSz, texSz, kSrcGamma).r,
+                         sampleLinearPixel(origTex, float2(x0r + 1.0f, y0),        imgSz, texSz, kSrcGamma).r, fxr);
+        float rBot = mix(sampleLinearPixel(origTex, float2(x0r,        y0 + 1.0f), imgSz, texSz, kSrcGamma).r,
+                         sampleLinearPixel(origTex, float2(x0r + 1.0f, y0 + 1.0f), imgSz, texSz, kSrcGamma).r, fxr);
+        float x0b = floor(p.x + gunConv.b);
+        float fxb = smoothstep(0.5f - wx, 0.5f + wx, fract(p.x + gunConv.b));
+        float bTop = mix(sampleLinearPixel(origTex, float2(x0b,        y0),        imgSz, texSz, kSrcGamma).b,
+                         sampleLinearPixel(origTex, float2(x0b + 1.0f, y0),        imgSz, texSz, kSrcGamma).b, fxb);
+        float bBot = mix(sampleLinearPixel(origTex, float2(x0b,        y0 + 1.0f), imgSz, texSz, kSrcGamma).b,
+                         sampleLinearPixel(origTex, float2(x0b + 1.0f, y0 + 1.0f), imgSz, texSz, kSrcGamma).b, fxb);
+        dotCol.r = mix(rTop, rBot, fy);
+        dotCol.b = mix(bTop, bBot, fy);
+    }
+    return dotCol;
+}
+
+inline float3 synthesize31kProgressiveLines(float3 dotCol, float2 p, float pxPer31kLine) {
     // Phase-lock 480 progressive 31.5 kHz raster lines cleanly at k-0.25 and k+0.25 inside each source row.
     float lineCoord = (p.y + 0.25f) * 2.0f;
     float distToLine = abs(fract(lineCoord + 0.5f) - 0.5f);
-    float peakLum = max(picture.r, max(picture.g, picture.b));
-    float spotSigma = mix(0.24f, 0.37f, sqrt(peakLum));
+    float peakLum = max(dotCol.r, max(dotCol.g, dotCol.b));
+    float spotSigma = mix(0.25f, 0.39f, sqrt(peakLum));
     float lineEnergy = exp(-0.5f * (distToLine * distToLine) / (spotSigma * spotSigma));
 
-    float scanGain = 0.67f + 0.45f * lineEnergy;
-    float pxPer31kLine = 1.0f / max(abs(dfdy(lineCoord)), 0.001f);
-    return picture * mix(0.95f, scanGain, smoothstep(1.30f, 2.25f, pxPer31kLine));
+    float scanGain = 0.69f + 0.43f * lineEnergy;
+    return dotCol * mix(0.96f, scanGain, smoothstep(1.30f, 2.25f, pxPer31kLine));
 }
 
 inline float3 applyDeltaDotTrioMask(float3 rgb, float2 screenPx, float viewWidth, float srcWidth, float maskStrength, float hdrFactor) {
-    // High-density 0.31 mm delta triad pitch (~2.65 triads per source pixel) keeps dot-by-dot edges clean.
-    float pitchX = clamp(viewWidth / max(srcWidth * 2.65f, 1.0f), 2.1f, 3.0f);
+    // High-density 0.31 mm delta triad pitch (~2.70 triads per source pixel) preserves dot-by-dot clarity.
+    float pitchX = clamp(viewWidth / max(srcWidth * 2.70f, 1.0f), 2.1f, 3.0f);
     float pitchY = pitchX * 0.8660254f;
     float rowIdx = floor(screenPx.y / pitchY);
     float u = fract(screenPx.x / pitchX + 0.5f * glsl_mod(rowIdx, 2.0f));
@@ -768,7 +817,7 @@ inline float3 applyDeltaDotTrioMask(float3 rgb, float2 screenPx, float viewWidth
     float3 dotDist = sqrt(dx * dx + dy * dy);
     float3 dots = 1.0f - smoothstep(float3(0.08f), float3(0.45f), dotDist);
 
-    float strength = mix(0.38f, 0.76f, smoothstep(420.0f, 960.0f, viewWidth)) * maskStrength;
+    float strength = mix(0.36f, 0.72f, smoothstep(420.0f, 960.0f, viewWidth)) * maskStrength;
     float floorLift = mix(0.90f, 0.84f, saturate(hdrFactor * 0.45f));
     float peakSpan = mix(0.16f, 0.24f, saturate(hdrFactor * 0.45f));
     return rgb * mix(float3(1.0f), floorLift + peakSpan * dots, clamp(strength, 0.0f, 1.0f));
@@ -785,46 +834,140 @@ fragment float4 displayX68k31kFragment(FullscreenOut in [[stage_in]],
     float loadExcess = max(beamLoad - kBeamLoadKnee, 0.0f) * u.hvBloom;
     float phase = glsl_mod(float(u.frameCount), 4096.0f) / 59.94f;
 
-    // CZ-612D / CZ-614D smoked FST CRT curve with tight PC-grade HV regulation.
-    CrtRasterGeometry geom = computeCrtRasterGeometry(in.texCoord, imgSz, u.curvature * 0.78f, loadExcess, 0.008f);
-    float3 glass = float3(0.010f, 0.012f, 0.015f);
-    if (geom.outsideBezel) {
-        return float4(srgbToLinear(glass * 0.50f), 1.0f);
+    // scrPos: x [-1..1] Left->Right, y [-1..1] Bottom->Top inside the 4:3 viewport.
+    float2 face = in.texCoord * 2.0f - 1.0f;
+    float2 scrPos = float2(face.x, -face.y);
+    const float kVpAspect = 4.0f / 3.0f;
+    float2 isoScr = float2(scrPos.x * kVpAspect, scrPos.y);
+
+    // Outer CZ-612D-BK monitor cabinet silhouette and curved 4:3 glass opening centered slightly high.
+    float chassisDist = roundedFrameDistance(isoScr, float2(0.985f * kVpAspect, 0.985f), 0.045f);
+    if (chassisDist > 0.014f) {
+        return float4(float3(0.0f), 1.0f);
     }
 
-    float y = floor(geom.p.y);
-    float fracY = fract(geom.p.y);
+    const float2 kTubeCenter = float2(0.0f, 0.042f);
+    const float2 kTubeHalf = float2(0.840f, 0.840f);
+    float2 tubeCoord = (scrPos - kTubeCenter) / kTubeHalf;
+    float2 glassFace = float2(tubeCoord.x, -tubeCoord.y);
+
+    float curv = clamp(u.curvature, 0.0f, 1.5f) * 0.78f;
+    float2 curved = glassFace * (float2(1.0f + 0.012f * curv) + glassFace.yx * glassFace.yx * float2(0.072f, 0.092f) * curv);
+    float hvBloom = 1.0f + 0.007f * loadExcess;
+    float2 signal = curved / (float2(0.945f, 0.940f) * hvBloom);
+    float2 signalEdge = abs(signal);
+    float raster = (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.x, signalEdge.x))
+                 * (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.y, signalEdge.y));
+
+    float2 p = (signal * 0.5f + 0.5f) * imgSz - 0.5f;
+    float2 fwidthP = float2(max(abs(dfdx(p.x)), 0.001f), max(abs(dfdy(p.y)), 0.001f));
+    float pxPer31kLine = 1.0f / max(abs(dfdy((p.y + 0.25f) * 2.0f)), 0.001f);
+
+    // Isotropic signed distance to the curved bezel opening around the glass faceplate.
+    float2 isoTube = float2(tubeCoord.x * kTubeHalf.x * kVpAspect, tubeCoord.y * kTubeHalf.y);
+    float2 isoBezelHalf = float2(kTubeHalf.x * kVpAspect, kTubeHalf.y);
+    float2 bezelWarp = isoTube * (float2(1.0f + 0.005f * curv)
+                                  + float2(tubeCoord.y * tubeCoord.y * 0.024f, tubeCoord.x * tubeCoord.x * 0.028f) * curv);
+    float tubeDist = roundedFrameDistance(bezelWarp, isoBezelHalf, 0.055f);
+
+    // Sample screen-edge bounce light evenly for illuminating the inner recessed bevel walls.
+    float2 edgeSampleCoord = clamp(p, float2(1.0f), imgSz - 2.0f);
+    float3 bounceCol = 0.25f * (sampleLinearPixel(origTex, floor(edgeSampleCoord + float2(-4.0f,  0.0f)), imgSz, texSz, kSrcGamma)
+                              + sampleLinearPixel(origTex, floor(edgeSampleCoord + float2( 4.0f,  0.0f)), imgSz, texSz, kSrcGamma)
+                              + sampleLinearPixel(origTex, floor(edgeSampleCoord + float2( 0.0f, -4.0f)), imgSz, texSz, kSrcGamma)
+                              + sampleLinearPixel(origTex, floor(edgeSampleCoord + float2( 0.0f,  4.0f)), imgSz, texSz, kSrcGamma));
+
+    // Matte CZ-612D-BK titanium-black ABS cabinet & recessed bevel shader (when tubeDist > -0.003).
+    float bezelMask = smoothstep(-0.003f, 0.003f, tubeDist);
+    float chassisMask = 1.0f - smoothstep(-0.004f, 0.014f, chassisDist);
+    float3 bezelColor = float3(0.0f);
+    if (bezelMask > 0.001f) {
+        float2 bGrad = roundedFrameGrad(bezelWarp, isoBezelHalf, 0.055f);
+        float bevelSlope = 1.0f - smoothstep(0.0f, 0.062f, tubeDist);
+
+        // Construct 3D bezel surface normal: tilted 45 deg inward on bevel lip, facing forward on flat frame.
+        float3 nBezel = normalize(mix(float3(scrPos.x * 0.04f, scrPos.y * 0.04f, 1.0f),
+                                      float3(-bGrad.x * 0.72f, -bGrad.y * 0.72f, 0.69f),
+                                      bevelSlope));
+        float3 lightDir = normalize(float3(-0.34f, 0.76f, 0.55f));
+        float ndotl = saturate(dot(nBezel, lightDir));
+
+        // Micro-textured dark titanium-black plastic base + ridge specular + lower flap seam + green LED.
+        float grain = (hash13(float3(floor(in.position.xy * 0.75f), 7.0f)) - 0.5f) * 0.0035f;
+        float ridgeGlow = exp(-abs(tubeDist - 0.058f) * 140.0f) * (0.25f + 0.75f * ndotl);
+        float3 plasticSrgb = float3(0.036f, 0.038f, 0.042f) + float3(0.032f, 0.034f, 0.038f) * ndotl + grain;
+        plasticSrgb += float3(0.022f, 0.024f, 0.027f) * ridgeGlow;
+
+        // CZ-612D lower control cover horizontal recess groove & subtle vertical flap joints.
+        float seamY = scrPos.y + 0.918f;
+        float seamMask = (abs(scrPos.x) < 0.78f) ? 1.0f : 0.0f;
+        float horizSeam = exp(-abs(seamY) * 260.0f) * seamMask;
+        float seamCatch = exp(-abs(seamY + 0.008f) * 260.0f) * seamMask;
+        float vertSeam = exp(-abs(abs(scrPos.x) - 0.78f) * 240.0f) * ((scrPos.y < -0.918f) ? 1.0f : 0.0f);
+        plasticSrgb *= (1.0f - 0.45f * max(horizSeam, vertSeam));
+        plasticSrgb += float3(0.015f, 0.016f, 0.018f) * seamCatch;
+
+        // Minimalist emerald CZ-612D power indicator LED on lower-right chin above control flap.
+        float ledDist = length((scrPos - float2(0.715f, -0.892f)) * float2(kVpAspect, 1.0f));
+        float ledCore = 1.0f - smoothstep(0.006f, 0.012f, ledDist);
+        float ledHalo = exp(-ledDist * 90.0f) * 0.25f;
+
+        bezelColor = srgbToLinear(max(plasticSrgb, 0.0f));
+        // Real-time screen phosphor light softly bouncing off all four angled inner plastic bevel walls.
+        bezelColor += bounceCol * (0.048f * bevelSlope * (0.45f + 0.45f * saturate(-bGrad.y)));
+        bezelColor += float3(0.08f, 1.05f, 0.34f) * (ledCore * 0.90f + ledHalo * 0.22f);
+        bezelColor *= chassisMask;
+    }
+
+    if (tubeDist > 0.003f) {
+        return float4(bezelColor, 1.0f);
+    }
+
+    // Deep curved smoked CRT glass optics inside the bezel opening.
     const float3 kX68kConv = float3(-0.004f, 0.0f, 0.005f);
-    float3 rowA = sampleHorizontalBeamCustom(origTex, geom.p, y, imgSz, texSz, 0.16f, kX68kConv);
-    float3 rowB = sampleHorizontalBeamCustom(origTex, geom.p, y + 1.0f, imgSz, texSz, 0.16f, kX68kConv);
-    float3 picture = mix(rowA, rowB, smoothstep(0.43f, 0.57f, fracY));
+    float3 dotCol = sampleCrispLinearDot(origTex, p, imgSz, texSz, fwidthP, kX68kConv);
+    float3 rgb = synthesize31kProgressiveLines(dotCol, p, pxPer31kLine);
 
-    float3 rgb = synthesize31kProgressiveLines(rowA, rowB, fracY, geom.p);
-
-    float2 q = floor(geom.p + 0.5f);
+    float2 q = floor(p + 0.5f);
     float3 previous = sampleLinearPixel(prevTex, q, imgSz, texSz, kSrcGamma);
-    rgb += max(previous - picture, 0.0f) * float3(0.032f, 0.062f, 0.046f);
-    // Wide, gentle internal faceplate halation lets bright sprites glow in glass without softening crisp dot edges.
-    rgb = applyGlassHalationCustom(origTex, rgb, geom.p, loadExcess, imgSz, texSz, 1.02f, 0.015f, 0.014f, 1.65f);
+    rgb += max(previous - dotCol, 0.0f) * float3(0.032f, 0.062f, 0.046f);
+    rgb = applyGlassHalationCustom(origTex, rgb, p, loadExcess, imgSz, texSz, 1.02f, 0.017f, 0.015f, 1.80f);
 
     float viewWidth = (u.outputSize.x > 1.0f) ? u.outputSize.x : (1.0f / max(abs(dfdx(in.texCoord.x)), 0.0001f));
     float hdrFactor = max(clamp(u.hdrHeadroom, 1.0f, 3.5f) - 1.0f, 0.0f) * clamp(u.hdrBoost, 0.0f, 1.5f);
     rgb = applyDeltaDotTrioMask(rgb, in.position.xy, viewWidth, imgSz.x, u.maskStrength, hdrFactor);
 
-    // 9300K Japanese X68000 monitor white balance + gentle tube edge falloff.
     const float3 k9300kBalance = float3(0.95f, 0.98f, 1.04f);
-    float vignette = 1.0f - 0.17f * smoothstep(0.30f, 1.90f, dot(geom.face, geom.face));
+    float vignette = 1.0f - 0.14f * smoothstep(0.32f, 1.85f, dot(tubeCoord, tubeCoord));
+
+    // Recessed bezel shadow around top/left overhang where the plastic housing shadows the curved glass.
+    float overhangWeight = 0.50f + 0.35f * saturate(tubeCoord.y) + 0.25f * saturate(-tubeCoord.x);
+    float glassDepthShadow = mix(1.0f - 0.58f * saturate(overhangWeight), 1.0f, smoothstep(-0.072f, 0.0f, tubeDist));
+
+    // 3D curved CRT glass dome normal + reflected environment (soft window box, sky horizon gradient, Fresnel rim).
+    float curvSlope = 0.28f * clamp(u.curvature, 0.0f, 1.5f);
+    float3 N = normalize(float3(-tubeCoord.x * curvSlope, -tubeCoord.y * curvSlope, 1.0f));
+    float3 R = reflect(float3(0.0f, 0.0f, -1.0f), N);
+    float envHorizon = smoothstep(-0.30f, 0.55f, R.y);
+    float2 winUV = (R.xy - float2(-0.18f, 0.22f)) / float2(0.34f, 0.26f);
+    float windowBox = (1.0f - smoothstep(0.45f, 1.15f, abs(winUV.x)))
+                    * (1.0f - smoothstep(0.45f, 1.15f, abs(winUV.y)));
+    float fresnel = 0.016f + 0.095f * pow(1.0f - saturate(N.z), 2.3f);
+    float glassEdgeGlint = exp(-abs(tubeDist + 0.004f) * 210.0f) * 0.012f;
+
+    float3 frontGlassEnv = float3(0.78f, 0.85f, 0.98f)
+                         * (fresnel * (0.045f + 0.145f * envHorizon + 0.22f * windowBox))
+                         * glassDepthShadow;
+    frontGlassEnv += float3(0.75f, 0.84f, 0.96f) * glassEdgeGlint * glassDepthShadow;
+
+    // Smoked glass transmission + HDR ABL phosphor rendering.
+    float3 glassBaseSrgb = float3(0.010f, 0.012f, 0.015f);
     float noise = fract(sin(dot(fmod(in.position.xy, 317.0f), float2(12.9898f, 78.233f)) + phase * 17.0f) * 43758.5453f) - 0.5f;
+    float glassAperture = 1.0f - bezelMask;
+    float4 screenOut = finalizeCrtPixel(rgb * k9300kBalance * vignette * glassDepthShadow,
+                                        beamLoad, glassAperture, raster, glassBaseSrgb,
+                                        0.0f, 0.0f, noise * 0.004f, u.hdrHeadroom, u.hdrBoost);
+    screenOut.rgb += frontGlassEnv * glassAperture;
 
-    float4 finalPixel = finalizeCrtPixel(rgb * k9300kBalance * vignette, beamLoad, geom.aperture, geom.raster,
-                                         glass, geom.reflection, geom.lip, noise * 0.004f, u.hdrHeadroom, u.hdrBoost);
-
-    // Polished curved front-glass optics: subtle room reflection band, Fresnel dome sheen, and bezel bevel glint.
-    float glassFresnel = pow(saturate(dot(geom.face * 0.88f, geom.face * 0.88f)), 2.3f);
-    float glassSheen = pow(saturate(1.0f - abs(geom.face.x * 0.48f - geom.face.y * 0.88f + 0.34f)), 5.0f);
-    float glassBevel = exp(-abs(geom.edgeDistance + 0.006f) * 150.0f);
-    float3 glassCoat = float3(0.84f, 0.90f, 1.00f)
-                     * (0.0042f * geom.reflection + 0.0028f * glassSheen + 0.0036f * glassFresnel + 0.0045f * glassBevel);
-    finalPixel.rgb += glassCoat * geom.aperture;
-    return finalPixel;
+    return float4(mix(screenOut.rgb, bezelColor, bezelMask), 1.0f);
 }
