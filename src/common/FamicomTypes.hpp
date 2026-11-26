@@ -7,11 +7,19 @@
  * video layout math, and platform frontends without pulling in OS frameworks.
  */
 
+/// Audio output profile matching the selected television / monitor connection.
+enum class TvAudioProfile : int {
+    DirectMonitor = 0, // Pure APU output (RGB monitor / CZ-612D)
+    ShowaRfMono   = 1, // 1980s 14" mono TV speaker + VHF FM hiss & 60 Hz sync buzz
+    HeiseiAvTv    = 2  // 1990s CRT TV speaker over clean RCA AV input (fuller range, no FM hiss)
+};
+
 /// User-configurable analog television and CRT monitor display options.
 struct CrtDisplayConfig {
-    bool rfMode = true;        // false = RGB Monitor, true = VHF RF Television
+    bool rfMode = true;        // false = RGB/Composite/31.5kHz, true = VHF RF Television
     bool monochrome = false;   // true (when rfMode) = 1970s P4 B&W RF television
-    bool x68k31kMode = false;  // true (when !rfMode) = Sharp X68000 CZ-612D/614D 31.5 kHz RGB CRT
+    bool x68k31kMode = false;  // true (when !rfMode) = Sharp X68000 CZ-612D 31.5 kHz RGB CRT
+    bool compositeMode = false;// true (when !rfMode && !x68k31kMode) = Heisei-era RCA Composite TV
     bool interlaced = true;    // true = 480i alternating fields, false = 240p (unused in 31.5 kHz)
     bool hdrEnabled = true;    // true = unlock HDR/EDR headroom + CRT ABL physics
     float hvBloom = 1.0f;      // Flyback high-voltage bloom strength (0.0 .. 2.0)
@@ -20,12 +28,20 @@ struct CrtDisplayConfig {
     float rfSnow = 1.0f;       // RF noise floor (0.0 .. 2.0)
     float rfSignal = 1.0f;     // RF interference / chroma artifact level (0.0 .. 2.0)
 
+    /// Returns the audio speaker/input profile associated with the active monitor mode.
+    TvAudioProfile audioProfile() const {
+        if (rfMode) return TvAudioProfile::ShowaRfMono;
+        if (compositeMode && !x68k31kMode) return TvAudioProfile::HeiseiAvTv;
+        return TvAudioProfile::DirectMonitor;
+    }
+
     /// Returns a flat-screen 15 kHz RGB monitor preset while preserving interlace/HDR preferences.
     static CrtDisplayConfig rgbFlatPreset(const CrtDisplayConfig &base) {
         CrtDisplayConfig next = base;
         next.rfMode = false;
         next.monochrome = false;
         next.x68k31kMode = false;
+        next.compositeMode = false;
         next.curvature = 0.0f;
         return next;
     }
@@ -36,6 +52,7 @@ struct CrtDisplayConfig {
         next.rfMode = true;
         next.monochrome = false;
         next.x68k31kMode = false;
+        next.compositeMode = false;
         next.curvature = 1.0f;
         next.hvBloom = 1.0f;
         next.slotMask = 1.0f;

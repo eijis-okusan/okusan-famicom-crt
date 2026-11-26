@@ -478,11 +478,21 @@ fragment float4 displayRgbFragment(FullscreenOut in [[stage_in]],
 
 // ---------- Pass 1B: Color VHF RF Television ----------
 
-inline float3 sampleRfScanline(texture2d<float> origTex, float2 p, float row, float rfSnow, float rfSig,
-                               float frameSeed, float2 imgSz, float2 texSz) {
+inline float3 sampleNtscScanline(texture2d<float> origTex,
+                                 float2 p,
+                                 float row,
+                                 float rfSnow,
+                                 float rfSig,
+                                 bool addGhosts,
+                                 float baseLift,
+                                 float washStrength,
+                                 float chromaGain,
+                                 float3 gunConv,
+                                 float frameSeed,
+                                 float2 imgSz,
+                                 float2 texSz) {
     float subcarrierLinePhase = row * kPi + glsl_mod(frameSeed, 2.0f) * 0.45f;
-    float wash = clamp(rfSig * 0.5f, 0.0f, 0.85f);
-    float baseLift = 0.026f * clamp(rfSnow, 0.0f, 1.5f);
+    float wash = clamp(rfSig * washStrength, 0.0f, 0.85f);
 
     float yAcc = 0.0f, iAcc = 0.0f, qAcc = 0.0f;
     for (int k = 0; k < 6; ++k) {
@@ -494,7 +504,7 @@ inline float3 sampleRfScanline(texture2d<float> origTex, float2 p, float row, fl
         float3 s1 = sampleVideoPixel(origTex, float2(x0 + 1.0f, row), imgSz, texSz);
         float3 vid = mix(s0, s1, fx);
 
-        if (rfSig > 0.001f) {
+        if (addGhosts && rfSig > 0.001f) {
             float3 g1 = sampleVideoPixel(origTex, float2(floor(xPos - 5.0f + 0.5f), row), imgSz, texSz);
             float3 g2 = sampleVideoPixel(origTex, float2(floor(xPos - 10.0f + 0.5f), row), imgSz, texSz);
             vid = max(float3(0.0f), vid + (0.12f * g1 - 0.04f * g2) * rfSig);
@@ -508,14 +518,14 @@ inline float3 sampleRfScanline(texture2d<float> origTex, float2 p, float row, fl
         float scCos = cos(scPhase);
         float scSin = sin(scPhase);
         float chromaDrive = mix(0.0f, 1.0f, clamp(rfSig, 0.0f, 1.5f));
-        float rfCarrier = yiq.x + baseLift + chromaDrive * (yiq.y * scCos + yiq.z * scSin);
+        float carrier = yiq.x + baseLift + chromaDrive * (yiq.y * scCos + yiq.z * scSin);
 
         float rfNoise = sampleRfWaveformNoise(xPos, row, rfSnow, frameSeed, 0.32f, 0.90f);
         rfNoise *= (rfNoise < 0.0f) ? mix(1.0f, 0.55f, clamp(yiq.x, 0.0f, 1.0f)) : 1.0f;
 
-        float rfWave = rfCarrier + rfNoise;
-        yAcc += rfWave * (1.0f / 6.0f);
-        float rxChroma = rfCarrier + rfNoise * 0.40f;
+        float wave = carrier + rfNoise;
+        yAcc += wave * (1.0f / 6.0f);
+        float rxChroma = carrier + rfNoise * 0.40f;
         iAcc += rxChroma * scCos * (2.0f / 6.0f);
         qAcc += rxChroma * scSin * (2.0f / 6.0f);
     }
@@ -525,16 +535,23 @@ inline float3 sampleRfScanline(texture2d<float> origTex, float2 p, float row, fl
         float3 cleanYiq = rgbToYiq(sampleVideoPixel(origTex, float2(floor(p.x + 0.5f), row), imgSz, texSz));
         outYiq = float3(yAcc, cleanYiq.y + iAcc * 0.35f, cleanYiq.z + qAcc * 0.35f);
     } else {
-        outYiq = float3(yAcc, iAcc * 0.85f, qAcc * 0.85f);
+        outYiq = float3(yAcc, iAcc * chromaGain, qAcc * chromaGain);
     }
 
     float3 outVid = clamp(yiqToRgb(outYiq), float3(1e-6f), float3(1.08f));
     float3 lin = pow(outVid, float3(kSrcGamma));
 
-    float3 convShift = kGunConvergence * 0.5f;
+    float3 convShift = gunConv * 0.5f;
     float3 linL = sampleLinearPixel(origTex, float2(floor(p.x - 1.0f + 0.5f), row), imgSz, texSz, kSrcGamma);
     float3 linR = sampleLinearPixel(origTex, float2(floor(p.x + 1.0f + 0.5f), row), imgSz, texSz, kSrcGamma);
     return mix(lin, float3(linR.r, lin.g, linL.b) * 0.14f + lin * 0.86f, abs(convShift.b));
+}
+
+inline float3 sampleRfScanline(texture2d<float> origTex, float2 p, float row, float rfSnow, float rfSig,
+                               float frameSeed, float2 imgSz, float2 texSz) {
+    float baseLift = 0.026f * clamp(rfSnow, 0.0f, 1.5f);
+    return sampleNtscScanline(origTex, p, row, rfSnow, rfSig, true, baseLift, 0.50f, 0.85f,
+                              kGunConvergence, frameSeed, imgSz, texSz);
 }
 
 fragment float4 displayRfFragment(FullscreenOut in [[stage_in]],
@@ -970,4 +987,57 @@ fragment float4 displayX68k31kFragment(FullscreenOut in [[stage_in]],
     screenOut.rgb += frontGlassEnv * glassAperture;
 
     return float4(mix(screenOut.rgb, bezelColor, bezelMask), 1.0f);
+}
+
+// ---------- Pass 1E: Heisei-Era CRT Television via RCA Composite Video Input ----------
+// Models a 1990s dark-tinted Japanese CRT television connected over RCA yellow composite video:
+// - Clean baseband NTSC Y/I/Q 3.58 MHz subcarrier bleed, cross-color & dot crawl without RF snow or ghosts
+// - Deeper black smoked glass, regulated flyback HV (0.011), refined convergence, and ~8800K TV balance
+
+fragment float4 displayCompositeFragment(FullscreenOut in [[stage_in]],
+                                         texture2d<float> beamTex [[texture(0)]],
+                                         texture2d<float> origTex [[texture(1)]],
+                                         texture2d<float> prevTex [[texture(2)]],
+                                         constant CrtUniforms &u [[buffer(0)]]) {
+    float2 imgSz = max(u.origInputSize, float2(1.0f));
+    float2 texSz = max(u.origTextureSize, float2(1.0f));
+    float beamLoad = beamTex.sample(kNearestClamp, float2(0.5f, 0.5f)).r;
+    float loadExcess = max(beamLoad - kBeamLoadKnee, 0.0f) * u.hvBloom;
+    float frameSeed = glsl_mod(float(u.frameCount), 4096.0f);
+    float phase = frameSeed / 59.94f;
+    float fieldParity = glsl_mod(float(u.frameCount), 2.0f);
+
+    // Flatter 1990s Heisei dark-tinted CRT tube with tighter HV regulation than 1980s RF sets.
+    CrtRasterGeometry geom = computeCrtRasterGeometry(in.texCoord, imgSz, u.curvature * 0.72f, loadExcess, 0.011f);
+    float3 glass = float3(0.008f, 0.011f, 0.014f);
+    if (geom.outsideBezel) {
+        return float4(srgbToLinear(glass * 0.50f), 1.0f);
+    }
+
+    const float3 kHeiseiConv = float3(-0.07f, 0.0f, 0.09f);
+    float y = floor(geom.p.y);
+    float fracY = fract(geom.p.y);
+    float3 rowA = sampleNtscScanline(origTex, geom.p, y, 0.0f, 0.90f, false, 0.0f, 0.14f, 0.96f,
+                                     kHeiseiConv, frameSeed, imgSz, texSz);
+    float3 rowB = sampleNtscScanline(origTex, geom.p, y + 1.0f, 0.0f, 0.90f, false, 0.0f, 0.14f, 0.96f,
+                                     kHeiseiConv, frameSeed, imgSz, texSz);
+    float3 picture = mix(rowA, rowB, fracY);
+    float3 rgb = synthesizeScanlines(rowA, rowB, fracY, geom.signal, fieldParity, loadExcess,
+                                     geom.pixelRowsPerSrc, u.interlaced, geom.tvLineDeriv);
+
+    float2 q = floor(geom.p + 0.5f);
+    float3 previous = sampleLinearPixel(prevTex, q, imgSz, texSz, kSrcGamma);
+    rgb += max(previous - picture, 0.0f) * (kP22Decay * 0.85f);
+    rgb = applyGlassHalationCustom(origTex, rgb, geom.p, loadExcess, imgSz, texSz, 1.12f, 0.035f, 0.026f, 1.0f);
+
+    float viewWidth = (u.outputSize.x > 1.0f) ? u.outputSize.x : (1.0f / max(abs(dfdx(in.texCoord.x)), 0.0001f));
+    float hdrFactor = max(clamp(u.hdrHeadroom, 1.0f, 3.5f) - 1.0f, 0.0f) * clamp(u.hdrBoost, 0.0f, 1.5f);
+    rgb = applyPhosphorMask(rgb, in.position.xy, viewWidth, imgSz.x, u.maskStrength, hdrFactor);
+
+    const float3 kHeiseiWhite = float3(0.97f, 0.99f, 1.02f);
+    float vignette = 1.0f - 0.19f * smoothstep(0.28f, 1.88f, dot(geom.face, geom.face));
+    float noise = fract(sin(dot(fmod(in.position.xy, 317.0f), float2(12.9898f, 78.233f)) + phase * 17.0f) * 43758.5453f) - 0.5f;
+
+    return finalizeCrtPixel(rgb * kHeiseiWhite * vignette, beamLoad, geom.aperture, geom.raster, glass,
+                            geom.reflection, geom.lip, noise * 0.005f, u.hdrHeadroom, u.hdrBoost);
 }

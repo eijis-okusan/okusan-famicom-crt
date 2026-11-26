@@ -28,7 +28,7 @@ public:
     void setMuted(bool muted);
     bool isMuted() const { return pipeline_.isMuted(); }
 
-    void setRfTvMode(bool enabled, float rfSnow, float rfSignal);
+    void setTvAudioProfile(TvAudioProfile profile, float rfSnow, float rfSignal);
     void setCartridgeAudioGain(float gain);
     void updateScreenMetrics(const uint32_t *xrgbPixels, unsigned width, unsigned height);
     void setConsolePowered(bool on);

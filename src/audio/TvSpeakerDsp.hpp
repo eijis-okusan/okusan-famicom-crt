@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include "common/FamicomTypes.hpp"
+
 namespace crt_audio {
 
 // Direct Form II Transposed biquad filter for the TV speaker EQ and RF static shaping.
@@ -139,10 +141,37 @@ struct FrameLuminanceStats {
     }
 };
 
+struct AvSpeakerChannelEq {
+    BiquadFilter hpf;
+    BiquadFilter dip;
+    BiquadFilter presence;
+    BiquadFilter lpf;
+
+    void configure(double sampleRate) {
+        // Larger 1990s Heisei CRT TV oval/2-way enclosure: keeps bass to ~205 Hz and sparkle to 6.8 kHz.
+        hpf.setHighPass(sampleRate, 205.0, 0.707);
+        dip.setPeaking(sampleRate, 580.0, 0.90, -1.6);
+        presence.setPeaking(sampleRate, 2150.0, 1.40, +2.2);
+        lpf.setLowPass(sampleRate, 6800.0, 0.707);
+        hpf.reset();
+        dip.reset();
+        presence.reset();
+        lpf.reset();
+    }
+
+    float process(float x) {
+        x = hpf.process(x);
+        x = dip.process(x);
+        x = presence.process(x);
+        return lpf.process(x);
+    }
+};
+
 /**
- * Models the audio path of a small 1980s monaural 14-inch CRT television connected
- * over VHF RF: narrow paper-cone speaker EQ, screen-modulated 60 Hz buzz, FM hiss,
- * standby snow static when unpowered, and de-clicked power/reset gates.
+ * Models home CRT television audio paths:
+ * - ShowaRfMono: 1980s 14-inch monaural TV speaker over VHF RF (580-2850 Hz, nasal peak, FM hiss & sync buzz)
+ * - HeiseiAvTv: 1990s CRT TV over clean RCA line-in (205-6800 Hz fuller speaker, zero FM hiss, faint RCA ground trace)
+ * - DirectMonitor: Transparent direct APU signal with de-clicked power/reset gates
  */
 class TvSpeakerDsp {
 public:
@@ -159,6 +188,9 @@ public:
         coneResonance_.setPeaking(sampleRate_, 1650.0, 1.95, +6.5);
         lpfStage1_.setLowPass(sampleRate_, 2850.0, 0.75);
         lpfStage2_.setLowPass(sampleRate_, 2850.0, 0.75);
+
+        avEqL_.configure(sampleRate_);
+        avEqR_.configure(sampleRate_);
 
         // Band-limit RF FM demodulator hiss and open-tuner standby snow.
         hissLpf_.setLowPass(sampleRate_, 3500.0, 0.707);
@@ -204,6 +236,7 @@ public:
         buzzEnvelope_ = 0.0f;
         bandEnvelope_ = 0.0f;
         rfWetMix_ = 0.0f;
+        avWetMix_ = 0.0f;
         consolePowered_ = true;
         powerGate_ = 1.0f;
         resetHeld_ = false;
@@ -216,7 +249,7 @@ public:
     void setResetHeld(bool held) { resetHeld_ = held; }
 
     void processStereoSample(float inL, float inR,
-                             bool rfEnabled, float rfSnow, float rfSignal,
+                             TvAudioProfile profile, float rfSnow, float rfSignal,
                              const FrameLuminanceStats &videoStats,
                              float &outL, float &outR) {
         // Exponential/linear short ramps prevent DC pop when toggling POWER (20 ms) or holding RESET (8 ms).
@@ -240,20 +273,20 @@ public:
         const float gatedL = (gameRunning ? inL : heldSampleL_) * (powerGate_ * resetGate_);
         const float gatedR = (gameRunning ? inR : heldSampleR_) * (powerGate_ * resetGate_);
 
-        // 12 ms crossfade when switching RGB <-> RF monitor presets.
-        const float targetWet = rfEnabled ? 1.0f : 0.0f;
-        if (rfWetMix_ < targetWet) rfWetMix_ = std::min(targetWet, rfWetMix_ + mixStep_);
-        else if (rfWetMix_ > targetWet) rfWetMix_ = std::max(targetWet, rfWetMix_ - mixStep_);
+        // 12 ms smooth crossfades across Direct / Showa RF / Heisei AV speaker profiles.
+        const float targetRf = (profile == TvAudioProfile::ShowaRfMono) ? 1.0f : 0.0f;
+        const float targetAv = (profile == TvAudioProfile::HeiseiAvTv) ? 1.0f : 0.0f;
+        rfWetMix_ = stepTowards(rfWetMix_, targetRf, mixStep_);
+        avWetMix_ = stepTowards(avWetMix_, targetAv, mixStep_);
 
-        if (rfWetMix_ <= 0.0001f) {
+        const float totalTvMix = std::clamp(rfWetMix_ + avWetMix_, 0.0f, 1.0f);
+        if (totalTvMix <= 0.0001f) {
             outL = gatedL;
             outR = gatedR;
             return;
         }
 
-        const float mono = 0.5f * (gatedL + gatedR);
-
-        // Advance NTSC 59.94 Hz vertical sweep to sample per-band video load into the sound carrier.
+        // Advance NTSC 59.94 Hz vertical sweep to sample per-band video load for TV circuit crosstalk.
         syncPhase_ += syncPhaseStep_;
         if (syncPhase_ >= 1.0) syncPhase_ -= 1.0;
         const float fieldPos = static_cast<float>(syncPhase_);
@@ -290,40 +323,57 @@ public:
 
         const float whiteNoise = nextNoiseSample();
         const float demodHiss = hissLpf_.process(whiteNoise);
-
-        const float snowScale = std::clamp(0.65f + 0.35f * rfSnow, 0.35f, 1.8f);
-        const float signalScale = std::clamp(0.70f + 0.30f * rfSignal, 0.45f, 1.6f);
         const float buzzScale = (0.45f + 1.25f * buzzEnvelope_) * powerGate_;
-        const float hissMasking = 1.08f - 0.28f * std::clamp(buzzEnvelope_, 0.0f, 1.0f);
-
         const float baseBuzz = syncWave * buzzScale;
-        const float rfInterference =
-            (baseBuzz + videoCrosstalkBuzz + 0.0025f * powerHum * powerGate_) * signalScale +
-            (0.0068f * demodHiss * hissMasking) * snowScale * powerGate_;
 
-        float speakerOut = mono + rfInterference;
-        speakerOut = hpfStage1_.process(speakerOut);
-        speakerOut = hpfStage2_.process(speakerOut);
-        speakerOut = hollowDip_.process(speakerOut);
-        speakerOut = coneResonance_.process(speakerOut);
-        speakerOut = lpfStage1_.process(speakerOut);
-        speakerOut = lpfStage2_.process(speakerOut);
-        speakerOut = fastTanh(speakerOut * 1.48f) * 0.85f;
+        float rfOut = 0.0f;
+        if (rfWetMix_ > 0.0001f) {
+            const float mono = 0.5f * (gatedL + gatedR);
+            const float snowScale = std::clamp(0.65f + 0.35f * rfSnow, 0.35f, 1.8f);
+            const float signalScale = std::clamp(0.70f + 0.30f * rfSignal, 0.45f, 1.6f);
+            const float hissMasking = 1.08f - 0.28f * std::clamp(buzzEnvelope_, 0.0f, 1.0f);
+            const float rfInterference =
+                (baseBuzz + videoCrosstalkBuzz + 0.0025f * powerHum * powerGate_) * signalScale +
+                (0.0068f * demodHiss * hissMasking) * snowScale * powerGate_;
 
-        // Open-tuner snow fades in inversely with consoleGate when powered off or browned out.
-        const float tunerSnow = tunerSnowLpf_.process(tunerSnowHpf_.process(whiteNoise)) * (0.036f * snowScale);
-        speakerOut += tunerSnow * (1.0f - powerGate_);
+            rfOut = mono + rfInterference;
+            rfOut = hpfStage1_.process(rfOut);
+            rfOut = hpfStage2_.process(rfOut);
+            rfOut = hollowDip_.process(rfOut);
+            rfOut = coneResonance_.process(rfOut);
+            rfOut = lpfStage1_.process(rfOut);
+            rfOut = lpfStage2_.process(rfOut);
+            rfOut = fastTanh(rfOut * 1.48f) * 0.85f;
 
-        if (rfWetMix_ >= 0.9999f) {
-            outL = speakerOut;
-            outR = speakerOut;
-        } else {
-            outL = gatedL * (1.0f - rfWetMix_) + speakerOut * rfWetMix_;
-            outR = gatedR * (1.0f - rfWetMix_) + speakerOut * rfWetMix_;
+            // Open-tuner snow fades in inversely with powerGate when unpowered or browned out.
+            const float tunerSnow = tunerSnowLpf_.process(tunerSnowHpf_.process(whiteNoise)) * (0.036f * snowScale);
+            rfOut += tunerSnow * (1.0f - powerGate_);
         }
+
+        float avOutL = 0.0f;
+        float avOutR = 0.0f;
+        if (avWetMix_ > 0.0001f) {
+            // Subtle RCA cable hum/board crosstalk (~10% of RF buzz, zero tuner hiss or open-tuner snow).
+            const float rcaTrace = (baseBuzz * 0.10f + videoCrosstalkBuzz * 0.14f + 0.00055f * powerHum) * powerGate_;
+            // Acoustic TV cabinet cross-coupling keeps stereo sound cohesive inside a shared bezel.
+            const float mixInL = gatedL * 0.88f + gatedR * 0.12f + rcaTrace;
+            const float mixInR = gatedR * 0.88f + gatedL * 0.12f + rcaTrace;
+            avOutL = fastTanh(avEqL_.process(mixInL) * 1.16f) * 0.93f;
+            avOutR = fastTanh(avEqR_.process(mixInR) * 1.16f) * 0.93f;
+        }
+
+        const float directMix = std::max(0.0f, 1.0f - rfWetMix_ - avWetMix_);
+        outL = gatedL * directMix + rfOut * rfWetMix_ + avOutL * avWetMix_;
+        outR = gatedR * directMix + rfOut * rfWetMix_ + avOutR * avWetMix_;
     }
 
 private:
+    static inline float stepTowards(float current, float target, float step) {
+        if (current < target) return std::min(target, current + step);
+        if (current > target) return std::max(target, current - step);
+        return current;
+    }
+
     static inline float fastTanh(float x) {
         const float xc = std::clamp(x, -3.0f, 3.0f);
         const float x2 = xc * xc;
@@ -346,6 +396,8 @@ private:
     BiquadFilter coneResonance_;
     BiquadFilter lpfStage1_;
     BiquadFilter lpfStage2_;
+    AvSpeakerChannelEq avEqL_;
+    AvSpeakerChannelEq avEqR_;
     BiquadFilter hissLpf_;
     BiquadFilter tunerSnowHpf_;
     BiquadFilter tunerSnowLpf_;
@@ -369,6 +421,7 @@ private:
     float bandEnvelope_ = 0.0f;
     uint32_t rngState_ = 0x6D2B79F5u;
     float rfWetMix_ = 0.0f;
+    float avWetMix_ = 0.0f;
 
     bool consolePowered_ = true;
     float powerGate_ = 1.0f;

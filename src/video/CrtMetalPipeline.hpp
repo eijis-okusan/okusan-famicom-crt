@@ -43,6 +43,7 @@ struct CrtMetalPipelines {
     id<MTLRenderPipelineState> displayRf = nil;
     id<MTLRenderPipelineState> displayBw = nil;
     id<MTLRenderPipelineState> displayX68k31k = nil;
+    id<MTLRenderPipelineState> displayComposite = nil;
     id<MTLRenderPipelineState> overlayPremul = nil;
     id<MTLRenderPipelineState> colorAlpha = nil;
 };

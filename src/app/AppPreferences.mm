@@ -34,6 +34,7 @@ void loadDisplayPreferences(CrtDisplayConfig &config, bool &outMuted, bool &outI
     if ([defaults objectForKey:@"useRf"])        config.rfMode = [defaults boolForKey:@"useRf"];
     if ([defaults objectForKey:@"monochrome"])   config.monochrome = [defaults boolForKey:@"monochrome"];
     if ([defaults objectForKey:@"x68k31k"])      config.x68k31kMode = [defaults boolForKey:@"x68k31k"];
+    if ([defaults objectForKey:@"compositeAv"])  config.compositeMode = [defaults boolForKey:@"compositeAv"];
     if ([defaults objectForKey:@"interlaced"])   config.interlaced = [defaults boolForKey:@"interlaced"];
     if ([defaults objectForKey:@"hdrEnabled"])   config.hdrEnabled = [defaults boolForKey:@"hdrEnabled"];
     if ([defaults objectForKey:@"hvBloom"])      config.hvBloom = [defaults floatForKey:@"hvBloom"];
@@ -51,6 +52,7 @@ void saveDisplayPreferences(const CrtDisplayConfig &config, bool muted, bool inv
     [defaults setBool:config.rfMode forKey:@"useRf"];
     [defaults setBool:config.monochrome forKey:@"monochrome"];
     [defaults setBool:config.x68k31kMode forKey:@"x68k31k"];
+    [defaults setBool:config.compositeMode forKey:@"compositeAv"];
     [defaults setBool:config.interlaced forKey:@"interlaced"];
     [defaults setBool:config.hdrEnabled forKey:@"hdrEnabled"];
     [defaults setFloat:config.hvBloom forKey:@"hvBloom"];
@@ -65,7 +67,7 @@ void saveDisplayPreferences(const CrtDisplayConfig &config, bool muted, bool inv
 void clearDisplayPreferences() {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSArray<NSString *> *keys = @[
-        @"useRf", @"monochrome", @"x68k31k", @"interlaced", @"hdrEnabled",
+        @"useRf", @"monochrome", @"x68k31k", @"compositeAv", @"interlaced", @"hdrEnabled",
         @"hvBloom", @"curvature", @"maskStrength",
         @"rfSnow", @"rfSignal", @"muted",
         @"view3dMode", @"invert3dEyes"

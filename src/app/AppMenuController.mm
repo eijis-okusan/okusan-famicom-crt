@@ -22,6 +22,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     NSMenuItem *_menuRf;
     NSMenuItem *_menuBwRf;
     NSMenuItem *_menuX68k31k;
+    NSMenuItem *_menuComposite;
     NSMenuItem *_menuPresetRgbFlat;
     NSMenuItem *_menuPresetRfCurvedNoise;
     NSMenuItem *_menuInterlaced;
@@ -160,6 +161,8 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     _menuBwRf    = add(app_l10n::tr(@"白黒 RF テレビ (P4蛍光体)", @"B&W RF Television (P4 Phosphor)"), @selector(selectBwRfMode:), @"3");
     _menuX68k31k = add(app_l10n::tr(@"CZ-612D 31.5kHz", @"CZ-612D 31.5kHz"),
                        @selector(selectX68k31kMode:), @"6");
+    _menuComposite = add(app_l10n::tr(@"平成テレビ (ビデオ入力)", @"Heisei TV (Composite Video)"),
+                         @selector(selectCompositeMode:), @"7");
     [displayMenu addItem:[NSMenuItem separatorItem]];
     _menuPresetRgbFlat       = add(app_l10n::tr(@"プリセット: RGB + フラット", @"Preset: RGB + Flat"),
                                    @selector(selectPresetRgbFlat:), @"4");
@@ -363,12 +366,16 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
                              fdsStatus:(const FdsDriveStatus &)fdsStatus {
     const BOOL isBwMode = config.rfMode && config.monochrome;
     const BOOL isX68kMode = !config.rfMode && config.x68k31kMode;
+    const BOOL isCompositeMode = !config.rfMode && !isX68kMode && config.compositeMode;
 
-    _menuRgb.state = (!config.rfMode && !isX68kMode) ? NSControlStateValueOn : NSControlStateValueOff;
+    _menuRgb.state = (!config.rfMode && !isX68kMode && !isCompositeMode)
+                         ? NSControlStateValueOn
+                         : NSControlStateValueOff;
     _menuRf.state = (config.rfMode && !config.monochrome) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuBwRf.state = isBwMode ? NSControlStateValueOn : NSControlStateValueOff;
     _menuX68k31k.state = isX68kMode ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuPresetRgbFlat.state = (!config.rfMode && !isX68kMode && config.curvature < 0.1f)
+    _menuComposite.state = isCompositeMode ? NSControlStateValueOn : NSControlStateValueOff;
+    _menuPresetRgbFlat.state = (!config.rfMode && !isX68kMode && !isCompositeMode && config.curvature < 0.1f)
                                    ? NSControlStateValueOn
                                    : NSControlStateValueOff;
     _menuPresetRfCurvedNoise.state = (config.rfMode && !config.monochrome &&

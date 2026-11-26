@@ -112,8 +112,8 @@ void MacAudioEngine::setMuted(bool muted) {
     pipeline_.setMuted(muted);
 }
 
-void MacAudioEngine::setRfTvMode(bool enabled, float rfSnow, float rfSignal) {
-    pipeline_.setRfTvMode(enabled, rfSnow, rfSignal);
+void MacAudioEngine::setTvAudioProfile(TvAudioProfile profile, float rfSnow, float rfSignal) {
+    pipeline_.setTvAudioProfile(profile, rfSnow, rfSignal);
 }
 
 void MacAudioEngine::setCartridgeAudioGain(float gain) {

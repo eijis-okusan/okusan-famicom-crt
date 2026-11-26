@@ -37,7 +37,7 @@ public:
     void setMuted(bool muted);
     bool isMuted() const { return muted_.load(std::memory_order_relaxed); }
 
-    void setRfTvMode(bool enabled, float rfSnow, float rfSignal);
+    void setTvAudioProfile(TvAudioProfile profile, float rfSnow, float rfSignal);
     void setCartridgeAudioGain(float gain);
     void updateScreenMetrics(const uint32_t *xrgbPixels, unsigned width, unsigned height);
     void setConsolePowered(bool on);
@@ -62,7 +62,7 @@ private:
     std::atomic<size_t> writeIndex_{0};
     std::atomic<bool> muted_{false};
 
-    std::atomic<bool> rfEnabled_{true};
+    std::atomic<TvAudioProfile> audioProfile_{TvAudioProfile::ShowaRfMono};
     std::atomic<float> rfSnow_{1.0f};
     std::atomic<float> rfSignal_{1.0f};
     std::atomic<float> cartAudioGain_{1.0f};

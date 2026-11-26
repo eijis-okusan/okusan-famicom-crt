@@ -203,7 +203,7 @@ void AudioPipeline::pushSamples(const int16_t *interleavedStereo, size_t frameCo
     const size_t used = (w >= r) ? (w - r) : (kRingCapacityFrames - r + w);
     const size_t freeFrames = kRingCapacityFrames - 1 - used;
 
-    const bool rfOn = rfEnabled_.load(std::memory_order_relaxed);
+    const TvAudioProfile audioProfile = audioProfile_.load(std::memory_order_relaxed);
     const float snowLevel = rfSnow_.load(std::memory_order_relaxed);
     const float signalLevel = rfSignal_.load(std::memory_order_relaxed);
     const float targetGain = cartAudioGain_.load(std::memory_order_relaxed);
@@ -241,7 +241,7 @@ void AudioPipeline::pushSamples(const int16_t *interleavedStereo, size_t frameCo
 
             float outL = inL;
             float outR = inR;
-            speakerDsp_.processStereoSample(inL, inR, rfOn, snowLevel, signalLevel, videoStats_, outL, outR);
+            speakerDsp_.processStereoSample(inL, inR, audioProfile, snowLevel, signalLevel, videoStats_, outL, outR);
             const size_t dst = ((w + written) % kRingCapacityFrames) * 2;
             ringBuffer_[dst + 0] = outL;
             ringBuffer_[dst + 1] = outR;
@@ -291,7 +291,7 @@ void AudioPipeline::pushSamples(const int16_t *interleavedStereo, size_t frameCo
 
         float outL = inL;
         float outR = inR;
-        speakerDsp_.processStereoSample(inL, inR, rfOn, snowLevel, signalLevel, videoStats_, outL, outR);
+        speakerDsp_.processStereoSample(inL, inR, audioProfile, snowLevel, signalLevel, videoStats_, outL, outR);
         const size_t dst = ((w + i) % kRingCapacityFrames) * 2;
         ringBuffer_[dst + 0] = outL;
         ringBuffer_[dst + 1] = outR;
@@ -343,8 +343,8 @@ void AudioPipeline::setMuted(bool muted) {
     muted_.store(muted, std::memory_order_relaxed);
 }
 
-void AudioPipeline::setRfTvMode(bool enabled, float rfSnow, float rfSignal) {
-    rfEnabled_.store(enabled, std::memory_order_relaxed);
+void AudioPipeline::setTvAudioProfile(TvAudioProfile profile, float rfSnow, float rfSignal) {
+    audioProfile_.store(profile, std::memory_order_relaxed);
     rfSnow_.store(rfSnow, std::memory_order_relaxed);
     rfSignal_.store(rfSignal, std::memory_order_relaxed);
 }
@@ -354,7 +354,7 @@ void AudioPipeline::setCartridgeAudioGain(float gain) {
 }
 
 void AudioPipeline::updateScreenMetrics(const uint32_t *xrgbPixels, unsigned width, unsigned height) {
-    if (!rfEnabled_.load(std::memory_order_relaxed)) return;
+    if (audioProfile_.load(std::memory_order_relaxed) == TvAudioProfile::DirectMonitor) return;
     videoStats_ = crt_audio::FrameLuminanceStats::fromXrgb8888(xrgbPixels, width, height);
 }
 
