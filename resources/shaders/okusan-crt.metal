@@ -840,21 +840,21 @@ fragment float4 displayX68k31kFragment(FullscreenOut in [[stage_in]],
     const float kVpAspect = 4.0f / 3.0f;
     float2 isoScr = float2(scrPos.x * kVpAspect, scrPos.y);
 
-    // Outer CZ-612D-BK monitor cabinet silhouette and curved 4:3 glass opening centered slightly high.
-    float chassisDist = roundedFrameDistance(isoScr, float2(0.985f * kVpAspect, 0.985f), 0.045f);
-    if (chassisDist > 0.014f) {
+    // Outer CZ-612D-BK monitor cabinet fills the 4:3 frame tightly so the CRT screen stays large.
+    float chassisDist = roundedFrameDistance(isoScr, float2(0.996f * kVpAspect, 0.996f), 0.032f);
+    if (chassisDist > 0.010f) {
         return float4(float3(0.0f), 1.0f);
     }
 
-    const float2 kTubeCenter = float2(0.0f, 0.042f);
-    const float2 kTubeHalf = float2(0.840f, 0.840f);
+    const float2 kTubeCenter = float2(0.0f, 0.018f);
+    const float2 kTubeHalf = float2(0.928f, 0.928f);
     float2 tubeCoord = (scrPos - kTubeCenter) / kTubeHalf;
     float2 glassFace = float2(tubeCoord.x, -tubeCoord.y);
 
     float curv = clamp(u.curvature, 0.0f, 1.5f) * 0.78f;
-    float2 curved = glassFace * (float2(1.0f + 0.012f * curv) + glassFace.yx * glassFace.yx * float2(0.072f, 0.092f) * curv);
+    float2 curved = glassFace * (float2(1.0f + 0.010f * curv) + glassFace.yx * glassFace.yx * float2(0.068f, 0.086f) * curv);
     float hvBloom = 1.0f + 0.007f * loadExcess;
-    float2 signal = curved / (float2(0.945f, 0.940f) * hvBloom);
+    float2 signal = curved / (float2(0.985f, 0.982f) * hvBloom);
     float2 signalEdge = abs(signal);
     float raster = (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.x, signalEdge.x))
                  * (1.0f - smoothstep(1.0f, 1.0f + 2.0f / imgSz.y, signalEdge.y));
@@ -866,9 +866,9 @@ fragment float4 displayX68k31kFragment(FullscreenOut in [[stage_in]],
     // Isotropic signed distance to the curved bezel opening around the glass faceplate.
     float2 isoTube = float2(tubeCoord.x * kTubeHalf.x * kVpAspect, tubeCoord.y * kTubeHalf.y);
     float2 isoBezelHalf = float2(kTubeHalf.x * kVpAspect, kTubeHalf.y);
-    float2 bezelWarp = isoTube * (float2(1.0f + 0.005f * curv)
-                                  + float2(tubeCoord.y * tubeCoord.y * 0.024f, tubeCoord.x * tubeCoord.x * 0.028f) * curv);
-    float tubeDist = roundedFrameDistance(bezelWarp, isoBezelHalf, 0.055f);
+    float2 bezelWarp = isoTube * (float2(1.0f + 0.004f * curv)
+                                  + float2(tubeCoord.y * tubeCoord.y * 0.022f, tubeCoord.x * tubeCoord.x * 0.025f) * curv);
+    float tubeDist = roundedFrameDistance(bezelWarp, isoBezelHalf, 0.044f);
 
     // Sample screen-edge bounce light evenly for illuminating the inner recessed bevel walls.
     float2 edgeSampleCoord = clamp(p, float2(1.0f), imgSz - 2.0f);
@@ -879,11 +879,11 @@ fragment float4 displayX68k31kFragment(FullscreenOut in [[stage_in]],
 
     // Matte CZ-612D-BK titanium-black ABS cabinet & recessed bevel shader (when tubeDist > -0.003).
     float bezelMask = smoothstep(-0.003f, 0.003f, tubeDist);
-    float chassisMask = 1.0f - smoothstep(-0.004f, 0.014f, chassisDist);
+    float chassisMask = 1.0f - smoothstep(-0.003f, 0.010f, chassisDist);
     float3 bezelColor = float3(0.0f);
     if (bezelMask > 0.001f) {
-        float2 bGrad = roundedFrameGrad(bezelWarp, isoBezelHalf, 0.055f);
-        float bevelSlope = 1.0f - smoothstep(0.0f, 0.062f, tubeDist);
+        float2 bGrad = roundedFrameGrad(bezelWarp, isoBezelHalf, 0.044f);
+        float bevelSlope = 1.0f - smoothstep(0.0f, 0.026f, tubeDist);
 
         // Construct 3D bezel surface normal: tilted 45 deg inward on bevel lip, facing forward on flat frame.
         float3 nBezel = normalize(mix(float3(scrPos.x * 0.04f, scrPos.y * 0.04f, 1.0f),
@@ -894,23 +894,23 @@ fragment float4 displayX68k31kFragment(FullscreenOut in [[stage_in]],
 
         // Micro-textured dark titanium-black plastic base + ridge specular + lower flap seam + green LED.
         float grain = (hash13(float3(floor(in.position.xy * 0.75f), 7.0f)) - 0.5f) * 0.0035f;
-        float ridgeGlow = exp(-abs(tubeDist - 0.058f) * 140.0f) * (0.25f + 0.75f * ndotl);
+        float ridgeGlow = exp(-abs(tubeDist - 0.025f) * 240.0f) * (0.25f + 0.75f * ndotl);
         float3 plasticSrgb = float3(0.036f, 0.038f, 0.042f) + float3(0.032f, 0.034f, 0.038f) * ndotl + grain;
         plasticSrgb += float3(0.022f, 0.024f, 0.027f) * ridgeGlow;
 
         // CZ-612D lower control cover horizontal recess groove & subtle vertical flap joints.
-        float seamY = scrPos.y + 0.918f;
-        float seamMask = (abs(scrPos.x) < 0.78f) ? 1.0f : 0.0f;
-        float horizSeam = exp(-abs(seamY) * 260.0f) * seamMask;
-        float seamCatch = exp(-abs(seamY + 0.008f) * 260.0f) * seamMask;
-        float vertSeam = exp(-abs(abs(scrPos.x) - 0.78f) * 240.0f) * ((scrPos.y < -0.918f) ? 1.0f : 0.0f);
+        float seamY = scrPos.y + 0.968f;
+        float seamMask = (abs(scrPos.x) < 0.80f) ? 1.0f : 0.0f;
+        float horizSeam = exp(-abs(seamY) * 320.0f) * seamMask;
+        float seamCatch = exp(-abs(seamY + 0.006f) * 320.0f) * seamMask;
+        float vertSeam = exp(-abs(abs(scrPos.x) - 0.80f) * 280.0f) * ((scrPos.y < -0.968f) ? 1.0f : 0.0f);
         plasticSrgb *= (1.0f - 0.45f * max(horizSeam, vertSeam));
         plasticSrgb += float3(0.015f, 0.016f, 0.018f) * seamCatch;
 
-        // Minimalist emerald CZ-612D power indicator LED on lower-right chin above control flap.
-        float ledDist = length((scrPos - float2(0.715f, -0.892f)) * float2(kVpAspect, 1.0f));
-        float ledCore = 1.0f - smoothstep(0.006f, 0.012f, ledDist);
-        float ledHalo = exp(-ledDist * 90.0f) * 0.25f;
+        // Minimalist emerald CZ-612D power indicator LED on lower-right chin outside control flap.
+        float ledDist = length((scrPos - float2(0.865f, -0.962f)) * float2(kVpAspect, 1.0f));
+        float ledCore = 1.0f - smoothstep(0.005f, 0.010f, ledDist);
+        float ledHalo = exp(-ledDist * 110.0f) * 0.25f;
 
         bezelColor = srgbToLinear(max(plasticSrgb, 0.0f));
         // Real-time screen phosphor light softly bouncing off all four angled inner plastic bevel walls.
@@ -942,7 +942,7 @@ fragment float4 displayX68k31kFragment(FullscreenOut in [[stage_in]],
 
     // Recessed bezel shadow around top/left overhang where the plastic housing shadows the curved glass.
     float overhangWeight = 0.50f + 0.35f * saturate(tubeCoord.y) + 0.25f * saturate(-tubeCoord.x);
-    float glassDepthShadow = mix(1.0f - 0.58f * saturate(overhangWeight), 1.0f, smoothstep(-0.072f, 0.0f, tubeDist));
+    float glassDepthShadow = mix(1.0f - 0.55f * saturate(overhangWeight), 1.0f, smoothstep(-0.045f, 0.0f, tubeDist));
 
     // 3D curved CRT glass dome normal + reflected environment (soft window box, sky horizon gradient, Fresnel rim).
     float curvSlope = 0.28f * clamp(u.curvature, 0.0f, 1.5f);
@@ -953,7 +953,7 @@ fragment float4 displayX68k31kFragment(FullscreenOut in [[stage_in]],
     float windowBox = (1.0f - smoothstep(0.45f, 1.15f, abs(winUV.x)))
                     * (1.0f - smoothstep(0.45f, 1.15f, abs(winUV.y)));
     float fresnel = 0.016f + 0.095f * pow(1.0f - saturate(N.z), 2.3f);
-    float glassEdgeGlint = exp(-abs(tubeDist + 0.004f) * 210.0f) * 0.012f;
+    float glassEdgeGlint = exp(-abs(tubeDist + 0.003f) * 260.0f) * 0.012f;
 
     float3 frontGlassEnv = float3(0.78f, 0.85f, 0.98f)
                          * (fresnel * (0.045f + 0.145f * envHorizon + 0.22f * windowBox))
