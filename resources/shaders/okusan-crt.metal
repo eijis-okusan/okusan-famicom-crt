@@ -297,10 +297,11 @@ inline float3 applyGlassHalationCustom(texture2d<float> origTex,
                                        float2 texSz,
                                        float directGain,
                                        float haloBase,
-                                       float haloLoadGain) {
+                                       float haloLoadGain,
+                                       float haloRadius) {
     float3 halo = float3(0.0f);
     for (int i = 0; i < 4; ++i) {
-        float2 d = (i < 2) ? float2(2.6f, 0.0f) : float2(0.0f, 1.65f);
+        float2 d = ((i < 2) ? float2(2.6f, 0.0f) : float2(0.0f, 1.65f)) * haloRadius;
         if ((i & 1) == 0) d = -d;
         float3 neighbor = sampleLinearPixel(origTex, floor(p + d + 0.5f), imgSz, texSz, kSrcGamma);
         halo += neighbor * neighbor;
@@ -309,7 +310,7 @@ inline float3 applyGlassHalationCustom(texture2d<float> origTex,
 }
 
 inline float3 applyGlassHalation(texture2d<float> origTex, float3 rgb, float2 p, float loadExcess, float2 imgSz, float2 texSz) {
-    return applyGlassHalationCustom(origTex, rgb, p, loadExcess, imgSz, texSz, 1.16f, 0.044f, 0.036f);
+    return applyGlassHalationCustom(origTex, rgb, p, loadExcess, imgSz, texSz, 1.16f, 0.044f, 0.036f, 1.0f);
 }
 
 inline float3 applyPhosphorMask(float3 rgb, float2 screenPx, float viewWidth, float srcWidth, float maskStrength, float hdrFactor) {
@@ -363,6 +364,7 @@ inline float4 finalizeCrtPixel(float3 linearLight,
 
 struct CrtRasterGeometry {
     bool   outsideBezel;
+    float  edgeDistance;
     float  aperture;
     float  lip;
     float2 face;
@@ -383,7 +385,7 @@ inline CrtRasterGeometry computeCrtRasterGeometry(float2 texCoord,
     g.face = texCoord * 2.0f - 1.0f;
     float2 warp = float2(0.083f, 0.110f) * curvature;
     float2 curved = g.face * (float2(1.0f + 0.015f * curvature) + g.face.yx * g.face.yx * warp);
-    float edgeDistance = roundedBezelDistance(curved);
+    g.edgeDistance = roundedBezelDistance(curved);
 
     float hvBloom = 1.0f + hvSagExpansion * loadExcess;
     g.signal = curved / (float2(0.94f, 0.90f) * hvBloom);
@@ -396,9 +398,9 @@ inline CrtRasterGeometry computeCrtRasterGeometry(float2 texCoord,
     g.tvLineDeriv = abs(dfdy(tvLine));
     g.pixelRowsPerSrc = 1.0f / max(abs(dfdy(g.p.y)), 0.001f);
 
-    g.outsideBezel = (edgeDistance > 0.07f);
-    g.aperture = 1.0f - smoothstep(-0.012f, 0.005f, edgeDistance);
-    g.lip = exp(-abs(edgeDistance - 0.023f) * 75.0f);
+    g.outsideBezel = (g.edgeDistance > 0.07f);
+    g.aperture = 1.0f - smoothstep(-0.012f, 0.005f, g.edgeDistance);
+    g.lip = exp(-abs(g.edgeDistance - 0.023f) * 75.0f);
     g.reflection = exp(-4.0f * dot(g.face - float2(-0.42f, 0.53f), g.face - float2(-0.42f, 0.53f)));
     return g;
 }
@@ -731,14 +733,14 @@ fragment float4 displayBwFragment(FullscreenOut in [[stage_in]],
 
 // ---------- Pass 1D: Sharp X68000 CZ-612D / CZ-614D 31.5 kHz RGB Monitor ----------
 // Physically models a Japanese late-80s/early-90s 31.5 kHz multisync PC/AV CRT:
-// - Crisp 480-line progressive line-doubled raster (60 Hz non-interlaced, razor-clean pixel edges)
-// - Ultra-fine 0.31 mm delta dot-trio shadow mask so RGB subpixels recede into a smooth phosphor sheen
-// - Tight horizontal & vertical beam aperture (sigmaX 0.25), near-zero convergence drift, regulated HV (0.008)
-// - Smoked FST CRT glass curvature, subtle glass halation/bloom, and ~9300K Japanese CRT white balance
+// - Crisp dot-by-dot 480-line progressive line-doubled raster (60 Hz non-interlaced)
+// - Ultra-fine 0.31 mm delta dot-trio shadow mask so RGB subpixels stay unobtrusive
+// - Wideband horizontal & vertical beam focus (sigmaX 0.16), near-zero convergence drift, regulated HV (0.008)
+// - Polished smoked FST curved glass reflection, Fresnel bevel glint, wide glass halation, and ~9300K balance
 
 inline float3 synthesize31kProgressiveLines(float3 rowA, float3 rowB, float fracY, float2 p) {
-    // Keep vertical texel boundaries crisp across the doubled 31.5 kHz scan without muddy linear blur.
-    float edgeMix = smoothstep(0.36f, 0.64f, fracY);
+    // Razor-sharp vertical texel edges with only hairline anti-aliasing right on texel boundaries.
+    float edgeMix = smoothstep(0.43f, 0.57f, fracY);
     float3 picture = mix(rowA, rowB, edgeMix);
 
     // Phase-lock 480 progressive 31.5 kHz raster lines cleanly at k-0.25 and k+0.25 inside each source row.
@@ -748,14 +750,14 @@ inline float3 synthesize31kProgressiveLines(float3 rowA, float3 rowB, float frac
     float spotSigma = mix(0.24f, 0.37f, sqrt(peakLum));
     float lineEnergy = exp(-0.5f * (distToLine * distToLine) / (spotSigma * spotSigma));
 
-    float scanGain = 0.66f + 0.46f * lineEnergy;
+    float scanGain = 0.67f + 0.45f * lineEnergy;
     float pxPer31kLine = 1.0f / max(abs(dfdy(lineCoord)), 0.001f);
     return picture * mix(0.95f, scanGain, smoothstep(1.30f, 2.25f, pxPer31kLine));
 }
 
 inline float3 applyDeltaDotTrioMask(float3 rgb, float2 screenPx, float viewWidth, float srcWidth, float maskStrength, float hdrFactor) {
-    // High-density 0.31 mm delta triad pitch (~2.55 triads per source pixel): fine phosphor grain without loud RGB dots.
-    float pitchX = clamp(viewWidth / max(srcWidth * 2.55f, 1.0f), 2.1f, 3.1f);
+    // High-density 0.31 mm delta triad pitch (~2.65 triads per source pixel) keeps dot-by-dot edges clean.
+    float pitchX = clamp(viewWidth / max(srcWidth * 2.65f, 1.0f), 2.1f, 3.0f);
     float pitchY = pitchX * 0.8660254f;
     float rowIdx = floor(screenPx.y / pitchY);
     float u = fract(screenPx.x / pitchX + 0.5f * glsl_mod(rowIdx, 2.0f));
@@ -764,11 +766,11 @@ inline float3 applyDeltaDotTrioMask(float3 rgb, float2 screenPx, float viewWidth
     float3 dx = abs(fract(u - float3(0.0f, 0.3333f, 0.6667f) + 0.5f) - 0.5f);
     float3 dy = float3(v * (pitchY / pitchX));
     float3 dotDist = sqrt(dx * dx + dy * dy);
-    float3 dots = 1.0f - smoothstep(float3(0.08f), float3(0.44f), dotDist);
+    float3 dots = 1.0f - smoothstep(float3(0.08f), float3(0.45f), dotDist);
 
-    float strength = mix(0.42f, 0.82f, smoothstep(420.0f, 960.0f, viewWidth)) * maskStrength;
-    float floorLift = mix(0.87f, 0.80f, saturate(hdrFactor * 0.45f));
-    float peakSpan = mix(0.20f, 0.30f, saturate(hdrFactor * 0.45f));
+    float strength = mix(0.38f, 0.76f, smoothstep(420.0f, 960.0f, viewWidth)) * maskStrength;
+    float floorLift = mix(0.90f, 0.84f, saturate(hdrFactor * 0.45f));
+    float peakSpan = mix(0.16f, 0.24f, saturate(hdrFactor * 0.45f));
     return rgb * mix(float3(1.0f), floorLift + peakSpan * dots, clamp(strength, 0.0f, 1.0f));
 }
 
@@ -784,35 +786,45 @@ fragment float4 displayX68k31kFragment(FullscreenOut in [[stage_in]],
     float phase = glsl_mod(float(u.frameCount), 4096.0f) / 59.94f;
 
     // CZ-612D / CZ-614D smoked FST CRT curve with tight PC-grade HV regulation.
-    CrtRasterGeometry geom = computeCrtRasterGeometry(in.texCoord, imgSz, u.curvature * 0.72f, loadExcess, 0.008f);
-    float3 glass = float3(0.008f, 0.010f, 0.013f);
+    CrtRasterGeometry geom = computeCrtRasterGeometry(in.texCoord, imgSz, u.curvature * 0.78f, loadExcess, 0.008f);
+    float3 glass = float3(0.010f, 0.012f, 0.015f);
     if (geom.outsideBezel) {
         return float4(srgbToLinear(glass * 0.50f), 1.0f);
     }
 
     float y = floor(geom.p.y);
     float fracY = fract(geom.p.y);
-    const float3 kX68kConv = float3(-0.012f, 0.0f, 0.015f);
-    float3 rowA = sampleHorizontalBeamCustom(origTex, geom.p, y, imgSz, texSz, 0.25f, kX68kConv);
-    float3 rowB = sampleHorizontalBeamCustom(origTex, geom.p, y + 1.0f, imgSz, texSz, 0.25f, kX68kConv);
-    float3 picture = mix(rowA, rowB, smoothstep(0.36f, 0.64f, fracY));
+    const float3 kX68kConv = float3(-0.004f, 0.0f, 0.005f);
+    float3 rowA = sampleHorizontalBeamCustom(origTex, geom.p, y, imgSz, texSz, 0.16f, kX68kConv);
+    float3 rowB = sampleHorizontalBeamCustom(origTex, geom.p, y + 1.0f, imgSz, texSz, 0.16f, kX68kConv);
+    float3 picture = mix(rowA, rowB, smoothstep(0.43f, 0.57f, fracY));
 
     float3 rgb = synthesize31kProgressiveLines(rowA, rowB, fracY, geom.p);
 
     float2 q = floor(geom.p + 0.5f);
     float3 previous = sampleLinearPixel(prevTex, q, imgSz, texSz, kSrcGamma);
     rgb += max(previous - picture, 0.0f) * float3(0.032f, 0.062f, 0.046f);
-    rgb = applyGlassHalationCustom(origTex, rgb, geom.p, loadExcess, imgSz, texSz, 1.03f, 0.024f, 0.020f);
+    // Wide, gentle internal faceplate halation lets bright sprites glow in glass without softening crisp dot edges.
+    rgb = applyGlassHalationCustom(origTex, rgb, geom.p, loadExcess, imgSz, texSz, 1.02f, 0.015f, 0.014f, 1.65f);
 
     float viewWidth = (u.outputSize.x > 1.0f) ? u.outputSize.x : (1.0f / max(abs(dfdx(in.texCoord.x)), 0.0001f));
     float hdrFactor = max(clamp(u.hdrHeadroom, 1.0f, 3.5f) - 1.0f, 0.0f) * clamp(u.hdrBoost, 0.0f, 1.5f);
     rgb = applyDeltaDotTrioMask(rgb, in.position.xy, viewWidth, imgSz.x, u.maskStrength, hdrFactor);
 
-    // 9300K Japanese X68000 monitor white balance + subtle CRT edge falloff & glass reflection.
+    // 9300K Japanese X68000 monitor white balance + gentle tube edge falloff.
     const float3 k9300kBalance = float3(0.95f, 0.98f, 1.04f);
     float vignette = 1.0f - 0.17f * smoothstep(0.30f, 1.90f, dot(geom.face, geom.face));
     float noise = fract(sin(dot(fmod(in.position.xy, 317.0f), float2(12.9898f, 78.233f)) + phase * 17.0f) * 43758.5453f) - 0.5f;
 
-    return finalizeCrtPixel(rgb * k9300kBalance * vignette, beamLoad, geom.aperture, geom.raster, glass,
-                            geom.reflection * 0.70f, geom.lip, noise * 0.005f, u.hdrHeadroom, u.hdrBoost);
+    float4 finalPixel = finalizeCrtPixel(rgb * k9300kBalance * vignette, beamLoad, geom.aperture, geom.raster,
+                                         glass, geom.reflection, geom.lip, noise * 0.004f, u.hdrHeadroom, u.hdrBoost);
+
+    // Polished curved front-glass optics: subtle room reflection band, Fresnel dome sheen, and bezel bevel glint.
+    float glassFresnel = pow(saturate(dot(geom.face * 0.88f, geom.face * 0.88f)), 2.3f);
+    float glassSheen = pow(saturate(1.0f - abs(geom.face.x * 0.48f - geom.face.y * 0.88f + 0.34f)), 5.0f);
+    float glassBevel = exp(-abs(geom.edgeDistance + 0.006f) * 150.0f);
+    float3 glassCoat = float3(0.84f, 0.90f, 1.00f)
+                     * (0.0042f * geom.reflection + 0.0028f * glassSheen + 0.0036f * glassFresnel + 0.0045f * glassBevel);
+    finalPixel.rgb += glassCoat * geom.aperture;
+    return finalPixel;
 }
