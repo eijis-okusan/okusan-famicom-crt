@@ -569,7 +569,7 @@ NSString *firstDroppedRomPath(NSPasteboard *pasteboard) {
                    static_cast<double>(safeW), static_cast<double>(safeH), 0.0, 1.0};
     [enc setViewport:vp];
 
-    id<MTLRenderPipelineState> pso = _pipes.displayRgb;
+    id<MTLRenderPipelineState> pso = _displayConfig.x68k31kMode ? _pipes.displayX68k31k : _pipes.displayRgb;
     if (_displayConfig.rfMode) {
         pso = _displayConfig.monochrome ? _pipes.displayBw : _pipes.displayRf;
     }

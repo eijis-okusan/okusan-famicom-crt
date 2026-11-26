@@ -7,23 +7,25 @@
  * video layout math, and platform frontends without pulling in OS frameworks.
  */
 
-/// User-configurable analog television and CRT tube display options.
+/// User-configurable analog television and CRT monitor display options.
 struct CrtDisplayConfig {
     bool rfMode = true;        // false = RGB Monitor, true = VHF RF Television
     bool monochrome = false;   // true (when rfMode) = 1970s P4 B&W RF television
-    bool interlaced = true;    // true = 480i alternating fields, false = 240p
+    bool x68k31kMode = false;  // true (when !rfMode) = Sharp X68000 CZ-612D/614D 31.5 kHz RGB CRT
+    bool interlaced = true;    // true = 480i alternating fields, false = 240p (unused in 31.5 kHz)
     bool hdrEnabled = true;    // true = unlock HDR/EDR headroom + CRT ABL physics
     float hvBloom = 1.0f;      // Flyback high-voltage bloom strength (0.0 .. 2.0)
     float curvature = 1.0f;    // CRT glass barrel curvature (0.0 .. 1.5)
-    float slotMask = 1.0f;     // Phosphor shadow/slot mask intensity (0.0 .. 1.5)
+    float slotMask = 1.0f;     // Shadow/slot/dot-trio mask intensity (0.0 .. 1.5)
     float rfSnow = 1.0f;       // RF noise floor (0.0 .. 2.0)
     float rfSignal = 1.0f;     // RF interference / chroma artifact level (0.0 .. 2.0)
 
-    /// Returns a flat-screen RGB monitor preset while preserving interlace/HDR preferences.
+    /// Returns a flat-screen 15 kHz RGB monitor preset while preserving interlace/HDR preferences.
     static CrtDisplayConfig rgbFlatPreset(const CrtDisplayConfig &base) {
         CrtDisplayConfig next = base;
         next.rfMode = false;
         next.monochrome = false;
+        next.x68k31kMode = false;
         next.curvature = 0.0f;
         return next;
     }
@@ -33,6 +35,7 @@ struct CrtDisplayConfig {
         CrtDisplayConfig next = base;
         next.rfMode = true;
         next.monochrome = false;
+        next.x68k31kMode = false;
         next.curvature = 1.0f;
         next.hvBloom = 1.0f;
         next.slotMask = 1.0f;

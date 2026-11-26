@@ -21,6 +21,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     NSMenuItem *_menuRgb;
     NSMenuItem *_menuRf;
     NSMenuItem *_menuBwRf;
+    NSMenuItem *_menuX68k31k;
     NSMenuItem *_menuPresetRgbFlat;
     NSMenuItem *_menuPresetRfCurvedNoise;
     NSMenuItem *_menuInterlaced;
@@ -154,9 +155,11 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
         @selector(toggleBadBootSwitch:), @"");
     [displayMenu addItem:[NSMenuItem separatorItem]];
 
-    _menuRgb  = add(app_l10n::tr(@"RGB モニター接続", @"RGB Monitor"), @selector(selectRgbMode:), @"1");
-    _menuRf   = add(app_l10n::tr(@"カラー RF テレビ接続", @"Color RF Television"), @selector(selectColorRfMode:), @"2");
-    _menuBwRf = add(app_l10n::tr(@"白黒 RF テレビ (P4蛍光体)", @"B&W RF Television (P4 Phosphor)"), @selector(selectBwRfMode:), @"3");
+    _menuRgb     = add(app_l10n::tr(@"RGB モニター接続", @"RGB Monitor"), @selector(selectRgbMode:), @"1");
+    _menuRf      = add(app_l10n::tr(@"カラー RF テレビ接続", @"Color RF Television"), @selector(selectColorRfMode:), @"2");
+    _menuBwRf    = add(app_l10n::tr(@"白黒 RF テレビ (P4蛍光体)", @"B&W RF Television (P4 Phosphor)"), @selector(selectBwRfMode:), @"3");
+    _menuX68k31k = add(app_l10n::tr(@"X68000 モニター (31.5kHz RGB)", @"X68000 Monitor (31.5kHz RGB)"),
+                       @selector(selectX68k31kMode:), @"6");
     [displayMenu addItem:[NSMenuItem separatorItem]];
     _menuPresetRgbFlat       = add(app_l10n::tr(@"プリセット: RGB + フラット", @"Preset: RGB + Flat"),
                                    @selector(selectPresetRgbFlat:), @"4");
@@ -359,18 +362,21 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
                           invert3dEyes:(BOOL)invert3dEyes
                              fdsStatus:(const FdsDriveStatus &)fdsStatus {
     const BOOL isBwMode = config.rfMode && config.monochrome;
+    const BOOL isX68kMode = !config.rfMode && config.x68k31kMode;
 
-    _menuRgb.state = !config.rfMode ? NSControlStateValueOn : NSControlStateValueOff;
+    _menuRgb.state = (!config.rfMode && !isX68kMode) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuRf.state = (config.rfMode && !config.monochrome) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuBwRf.state = isBwMode ? NSControlStateValueOn : NSControlStateValueOff;
-    _menuPresetRgbFlat.state = (!config.rfMode && config.curvature < 0.1f)
+    _menuX68k31k.state = isX68kMode ? NSControlStateValueOn : NSControlStateValueOff;
+    _menuPresetRgbFlat.state = (!config.rfMode && !isX68kMode && config.curvature < 0.1f)
                                    ? NSControlStateValueOn
                                    : NSControlStateValueOff;
     _menuPresetRfCurvedNoise.state = (config.rfMode && !config.monochrome &&
                                       config.curvature > 0.1f && config.rfSnow > 0.1f)
                                          ? NSControlStateValueOn
                                          : NSControlStateValueOff;
-    _menuInterlaced.state = config.interlaced ? NSControlStateValueOn : NSControlStateValueOff;
+    _menuInterlaced.enabled = !isX68kMode;
+    _menuInterlaced.state = (!isX68kMode && config.interlaced) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuHdr.state = config.hdrEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     _menuHvBloom.state = (config.hvBloom > 0.1f) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuCurvature.state = (config.curvature > 0.1f) ? NSControlStateValueOn : NSControlStateValueOff;

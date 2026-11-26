@@ -232,9 +232,13 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
     [_screenView requestRedraw];
 }
 
-- (void)selectRgbMode:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = false; c.monochrome = false; }]; }
-- (void)selectColorRfMode:(id)sender { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = false; }]; }
-- (void)selectBwRfMode:(id)sender    { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = true;  }]; }
+- (void)selectRgbMode:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = false; c.monochrome = false; c.x68k31kMode = false; }]; }
+- (void)selectColorRfMode:(id)sender { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = false; c.x68k31kMode = false; }]; }
+- (void)selectBwRfMode:(id)sender    { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true;  c.monochrome = true;  c.x68k31kMode = false; }]; }
+- (void)selectX68k31kMode:(id)sender {
+    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = false; c.monochrome = false; c.x68k31kMode = true; }];
+    [_screenView showStatusBannerText:app_l10n::tr(@"X68000 モニター (31.5kHz RGB)", @"X68000 Monitor (31.5kHz RGB)")];
+}
 - (void)selectPresetRgbFlat:(id)sender {
     [self applyDisplayConfig:^(CrtDisplayConfig &c) { c = CrtDisplayConfig::rgbFlatPreset(c); }];
     [_screenView showStatusBannerText:app_l10n::tr(@"プリセット: RGB + フラット", @"Preset: RGB + Flat")];
@@ -256,9 +260,9 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
 - (void)toggleHvBloom:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.hvBloom = (c.hvBloom > 0.1f) ? 0.0f : 1.0f; }]; }
 - (void)toggleCurvature:(id)sender   { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.curvature = (c.curvature > 0.1f) ? 0.0f : 1.0f; }]; }
 - (void)toggleSlotMask:(id)sender    { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.slotMask = (c.slotMask > 0.1f) ? 0.0f : 1.0f; }]; }
-- (void)selectRfMild:(id)sender      { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.rfSnow = 0.5f; c.rfSignal = 0.65f; }]; }
-- (void)selectRfStandard:(id)sender  { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.rfSnow = 1.0f; c.rfSignal = 1.0f;  }]; }
-- (void)selectRfHeavy:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.rfSnow = 1.6f; c.rfSignal = 1.35f; }]; }
+- (void)selectRfMild:(id)sender      { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.x68k31kMode = false; c.rfSnow = 0.5f; c.rfSignal = 0.65f; }]; }
+- (void)selectRfStandard:(id)sender  { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.x68k31kMode = false; c.rfSnow = 1.0f; c.rfSignal = 1.0f;  }]; }
+- (void)selectRfHeavy:(id)sender     { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.rfMode = true; c.x68k31kMode = false; c.rfSnow = 1.6f; c.rfSignal = 1.35f; }]; }
 
 - (void)togglePause:(id)sender {
     if (!_famicom.isLoaded()) return;

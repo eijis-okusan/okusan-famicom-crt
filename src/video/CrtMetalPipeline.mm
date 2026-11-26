@@ -83,12 +83,14 @@ bool createPipelines(id<MTLDevice> device, MTLPixelFormat colorFormat, CrtMetalP
                                   colorFormat, false, false);
     out.displayBw = buildPipeline(device, library, @"fullscreenVertex", @"displayBwFragment",
                                   colorFormat, false, false);
+    out.displayX68k31k = buildPipeline(device, library, @"fullscreenVertex", @"displayX68k31kFragment",
+                                       colorFormat, false, false);
     out.overlayPremul = buildPipeline(device, library, @"overlayQuadVertex", @"overlayQuadFragment",
                                       colorFormat, true, true);
     out.colorAlpha = buildPipeline(device, library, @"fullscreenVertex", @"colorQuadFragment",
                                    colorFormat, true, false);
     return out.beamLoad && out.displayRgb && out.displayRf && out.displayBw &&
-           out.overlayPremul && out.colorAlpha;
+           out.displayX68k31k && out.overlayPremul && out.colorAlpha;
 }
 
 id<MTLTexture> createFrameTexture(id<MTLDevice> device) {
