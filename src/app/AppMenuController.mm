@@ -158,7 +158,7 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     _menuRgb     = add(app_l10n::tr(@"RGB モニター接続", @"RGB Monitor"), @selector(selectRgbMode:), @"1");
     _menuRf      = add(app_l10n::tr(@"カラー RF テレビ接続", @"Color RF Television"), @selector(selectColorRfMode:), @"2");
     _menuBwRf    = add(app_l10n::tr(@"白黒 RF テレビ (P4蛍光体)", @"B&W RF Television (P4 Phosphor)"), @selector(selectBwRfMode:), @"3");
-    _menuX68k31k = add(app_l10n::tr(@"X68000 モニター (31.5kHz RGB)", @"X68000 Monitor (31.5kHz RGB)"),
+    _menuX68k31k = add(app_l10n::tr(@"CZ-612D 31kHz", @"CZ-612D 31kHz"),
                        @selector(selectX68k31kMode:), @"6");
     [displayMenu addItem:[NSMenuItem separatorItem]];
     _menuPresetRgbFlat       = add(app_l10n::tr(@"プリセット: RGB + フラット", @"Preset: RGB + Flat"),
