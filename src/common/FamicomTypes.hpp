@@ -60,6 +60,33 @@ struct CrtDisplayConfig {
         next.rfSignal = 1.0f;
         return next;
     }
+
+    /// Returns a calibrated 1990s Heisei RCA Composite TV preset (curved glass, 480i, fuller TV speaker).
+    static CrtDisplayConfig heiseiCompositePreset(const CrtDisplayConfig &base) {
+        CrtDisplayConfig next = base;
+        next.rfMode = false;
+        next.monochrome = false;
+        next.x68k31kMode = false;
+        next.compositeMode = true;
+        next.interlaced = true;
+        next.curvature = 1.0f;
+        next.hvBloom = 1.0f;
+        next.slotMask = 1.0f;
+        return next;
+    }
+
+    /// Returns a calibrated Sharp CZ-612D 31.5 kHz RGB monitor preset with 3D FST glass & bezel optics.
+    static CrtDisplayConfig cz612d31kPreset(const CrtDisplayConfig &base) {
+        CrtDisplayConfig next = base;
+        next.rfMode = false;
+        next.monochrome = false;
+        next.x68k31kMode = true;
+        next.compositeMode = false;
+        next.curvature = 1.0f;
+        next.hvBloom = 1.0f;
+        next.slotMask = 1.0f;
+        return next;
+    }
 };
 
 /// Presentation modes for Famicom 3D System ($4016 OUT1 shutter) titles.

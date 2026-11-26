@@ -163,7 +163,7 @@ make distclean   # Remove build/ and clean third_party/fceumm objects
 | `P` | Pause / resume emulation |
 | `F5` / `F8` | Quick Save / Quick Load |
 | `Cmd + 1` / `2` / `3` / `6` / `7` | 15kHz RGB / Color RF / B&W RF / CZ-612D 31.5kHz / Heisei TV (AV) |
-| `Cmd + 4` / `5` | Preset: RGB + Flat / Preset: RF + Curved & Noise |
+| `Cmd + 4` / `5` / `8` / `9` | Presets: RGB + Flat / RF + Curved & Noise / Heisei TV / CZ-612D 31.5kHz |
 | `Cmd + D` | Toggle HDR CRT Luminance / Physical ABL (EDR) |
 | `Cmd + I` / `B` / `C` / `K` | Toggle 480i/240p / HV Bloom / Curvature / Slot Mask |
 | `Cmd + M` / `Cmd + F` | Mute Audio / Toggle Full Screen |

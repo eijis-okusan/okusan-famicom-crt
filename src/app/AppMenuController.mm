@@ -25,6 +25,8 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
     NSMenuItem *_menuComposite;
     NSMenuItem *_menuPresetRgbFlat;
     NSMenuItem *_menuPresetRfCurvedNoise;
+    NSMenuItem *_menuPresetHeiseiComposite;
+    NSMenuItem *_menuPresetCz612d;
     NSMenuItem *_menuInterlaced;
     NSMenuItem *_menuHdr;
     NSMenuItem *_menuHvBloom;
@@ -168,6 +170,10 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
                                    @selector(selectPresetRgbFlat:), @"4");
     _menuPresetRfCurvedNoise = add(app_l10n::tr(@"プリセット: RF + 湾曲・ノイズ付き", @"Preset: RF + Curved & Noise"),
                                    @selector(selectPresetRfCurvedNoise:), @"5");
+    _menuPresetHeiseiComposite = add(app_l10n::tr(@"プリセット: 平成テレビ (ビデオ入力)", @"Preset: Heisei TV (Composite)"),
+                                     @selector(selectPresetHeiseiComposite:), @"8");
+    _menuPresetCz612d          = add(app_l10n::tr(@"プリセット: CZ-612D 31.5kHz", @"Preset: CZ-612D 31.5kHz"),
+                                     @selector(selectPresetCz612d:), @"9");
     [displayMenu addItem:[NSMenuItem separatorItem]];
 
     _menuInterlaced = add(app_l10n::tr(@"525本 480i インターレース (オフで 240p)",
@@ -382,6 +388,14 @@ void assignUnmodifiedFunctionKey(unichar fnKey, NSMenuItem *item) {
                                       config.curvature > 0.1f && config.rfSnow > 0.1f)
                                          ? NSControlStateValueOn
                                          : NSControlStateValueOff;
+    _menuPresetHeiseiComposite.state = (isCompositeMode && config.interlaced &&
+                                        config.curvature > 0.1f && config.slotMask > 0.1f)
+                                           ? NSControlStateValueOn
+                                           : NSControlStateValueOff;
+    _menuPresetCz612d.state = (isX68kMode && config.curvature > 0.1f &&
+                               config.hvBloom > 0.1f && config.slotMask > 0.1f)
+                                  ? NSControlStateValueOn
+                                  : NSControlStateValueOff;
     _menuInterlaced.enabled = !isX68kMode;
     _menuInterlaced.state = (!isX68kMode && config.interlaced) ? NSControlStateValueOn : NSControlStateValueOff;
     _menuHdr.state = config.hdrEnabled ? NSControlStateValueOn : NSControlStateValueOff;

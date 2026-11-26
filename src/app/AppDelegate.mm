@@ -251,6 +251,14 @@ static bool isSupportedRomOrBiosPath(NSString *path) {
     [self applyDisplayConfig:^(CrtDisplayConfig &c) { c = CrtDisplayConfig::rfCurvedNoisePreset(c); }];
     [_screenView showStatusBannerText:app_l10n::tr(@"プリセット: RF + 湾曲・ノイズ付き", @"Preset: RF + Curved & Noise")];
 }
+- (void)selectPresetHeiseiComposite:(id)sender {
+    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c = CrtDisplayConfig::heiseiCompositePreset(c); }];
+    [_screenView showStatusBannerText:app_l10n::tr(@"プリセット: 平成テレビ (ビデオ入力)", @"Preset: Heisei TV (Composite)")];
+}
+- (void)selectPresetCz612d:(id)sender {
+    [self applyDisplayConfig:^(CrtDisplayConfig &c) { c = CrtDisplayConfig::cz612d31kPreset(c); }];
+    [_screenView showStatusBannerText:app_l10n::tr(@"プリセット: CZ-612D 31.5kHz", @"Preset: CZ-612D 31.5kHz")];
+}
 - (void)toggleInterlaced:(id)sender  { [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.interlaced = !c.interlaced; }]; }
 - (void)toggleHdr:(id)sender {
     [self applyDisplayConfig:^(CrtDisplayConfig &c) { c.hdrEnabled = !c.hdrEnabled; }];
